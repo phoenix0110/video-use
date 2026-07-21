@@ -63,9 +63,12 @@ uv sync                         # or: pip install -e .
 brew install ffmpeg             # required
 brew install yt-dlp             # optional, for downloading online sources
 
-# 3. Add your ElevenLabs API key
+# 3. Add your ElevenLabs API key (or skip if using local whisper)
 cp .env.example .env
 $EDITOR .env                    # ELEVENLABS_API_KEY=...
+
+# 3b. Alternative: use local openai-whisper (free, no API key needed)
+pip install openai-whisper       # then use helpers/transcribe_whisper.py
 ```
 
 ## How it works
