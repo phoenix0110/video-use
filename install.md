@@ -89,9 +89,23 @@ Figure out which agent you are running under, and register once. A symlink of th
 
 If you can't tell which agent you're in, ask the user once: "which agent am I running under — Claude Code, Codex, or something else?" Then pick the right target.
 
-### 5. ElevenLabs API key
+### 5. Transcription backend
 
-Scribe (ElevenLabs) does all transcription. Without a key, nothing transcribes.
+Two options — pick one:
+
+**Option A: Local whisper (free, no API key)**
+
+```bash
+pip install openai-whisper
+# Verify:
+python ~/Developer/video-use/helpers/transcribe_whisper.py --help
+```
+
+Uses `helpers/transcribe_whisper.py`. No speaker diarization or audio events, but works offline and costs nothing. Good enough for single-speaker content or when subtitles are provided separately.
+
+**Option B: ElevenLabs Scribe (paid, higher quality)**
+
+Scribe does all transcription. Without a key, nothing transcribes via this backend.
 
 1. Check existing state in this order and stop at the first hit:
 
