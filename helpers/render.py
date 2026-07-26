@@ -280,7 +280,11 @@ def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -
     ]
     print(f"concat → {out_path.name}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    concat_list.unlink(missing_ok=True)
+    try:
+        concat_list.unlink(missing_ok=True)
+    except OSError:
+        # WorkBuddy shim may block unlink on Windows; concat still succeeded.
+        pass
 
 
 # -------- Master SRT (Rule 5) ------------------------------------------------
@@ -490,6 +494,69 @@ def apply_loudnorm_two_pass(
     return True
 
 
+# -------- Narration + source audio mixing ------------------------------------
+
+
+DUCK_VOLUME = 0.15
+
+
+def _load_narration_manifest(narration_path: Path) -> list[dict] | None:
+    """Find and load narration_manifest.json next to the narration audio.
+
+    Returns the blocks list if found, None otherwise.
+    """
+    candidates = [
+        narration_path.parent / "narration" / "narration_manifest.json",
+        narration_path.parent / "narration_manifest.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            try:
+                manifest = json.loads(p.read_text(encoding="utf-8"))
+                blocks = manifest.get("blocks", [])
+                if blocks:
+                    return blocks
+            except (json.JSONDecodeError, KeyError):
+                continue
+    return None
+
+
+def _build_duck_filter(
+    base_input: str,
+    narration_input: str,
+    blocks: list[dict],
+) -> tuple[str, str]:
+    """Build an ffmpeg audio filter that mixes narration over ducked source.
+
+    During narration windows: source at DUCK_VOLUME, narration at 1.0.
+    During gaps: source at full volume, narration silent (it's already silent).
+
+    Returns (filter_string, output_label).
+    """
+    duck_expr_parts: list[str] = []
+    for b in blocks:
+        audio_dur = float(b.get("audio_duration") or 0)
+        if audio_dur <= 0:
+            continue
+        t0 = float(b["output_start"])
+        t1 = t0 + audio_dur
+        duck_expr_parts.append(f"between(t,{t0:.3f},{t1:.3f})")
+
+    if not duck_expr_parts:
+        return f"{base_input}acopy[outa]", "[outa]"
+
+    duck_expr = "+".join(duck_expr_parts)
+    target = DUCK_VOLUME
+    duck_formula = f"if({duck_expr},{target},1)"
+
+    parts: list[str] = [
+        f"{base_input}volume=eval=frame:volume='{duck_formula}'[srcducked]",
+        f"{narration_input}aresample=48000[narr48]",
+        f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[outa]",
+    ]
+    return ";".join(parts), "[outa]"
+
+
 # -------- Final compositing (Rule 1 + Rule 4) -------------------------------
 
 
@@ -499,17 +566,39 @@ def build_final_composite(
     subtitles_path: Path | None,
     out_path: Path,
     edit_dir: Path,
+    narration_path: Path | None = None,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
-    If there are no overlays and no subtitles, just copy base to out.
+    If narration_path is provided, its audio is mixed with the source track:
+    source is ducked during narration windows and plays at full volume in gaps.
+    If there are no overlays, no subtitles, and no narration, just copy base.
     """
     has_overlays = bool(overlays)
     has_subs = subtitles_path is not None and subtitles_path.exists()
+    has_narration = narration_path is not None
 
-    if not has_overlays and not has_subs:
-        # Nothing to do — just rename/copy base to final name
+    if not has_overlays and not has_subs and not has_narration:
         run(["ffmpeg", "-y", "-i", str(base_path), "-c", "copy", str(out_path)], quiet=True)
+        return
+
+    narration_blocks: list[dict] | None = None
+    if has_narration:
+        narration_blocks = _load_narration_manifest(narration_path)
+
+    use_audio_mix = has_narration and narration_blocks is not None
+
+    if not has_overlays and not has_subs and has_narration and not use_audio_mix:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(base_path), "-i", str(narration_path),
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+        print(f"muxing narration → {out_path.name}")
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         return
 
     inputs: list[str] = ["-i", str(base_path)]
@@ -517,13 +606,16 @@ def build_final_composite(
         ov_path = resolve_path(ov["file"], edit_dir)
         inputs += ["-i", str(ov_path)]
 
+    narration_input_idx: int | None = None
+    if has_narration:
+        narration_input_idx = 1 + len(overlays)
+        inputs += ["-i", str(narration_path)]
+
     filter_parts: list[str] = []
-    # PTS-shift every overlay so its frame 0 lands at start_in_output
     for idx, ov in enumerate(overlays, start=1):
         t = float(ov["start_in_output"])
         filter_parts.append(f"[{idx}:v]setpts=PTS-STARTPTS+{t}/TB[a{idx}]")
 
-    # Chain overlays on top of base
     current = "[0:v]"
     for idx, ov in enumerate(overlays, start=1):
         t = float(ov["start_in_output"])
@@ -537,35 +629,69 @@ def build_final_composite(
 
     # Subtitles LAST — Rule 1
     if has_subs:
-        subs_abs = str(subtitles_path.resolve()).replace(":", r"\:").replace("'", r"\'")
+        subs_abs = str(subtitles_path.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
         filter_parts.append(
             f"{current}subtitles='{subs_abs}':force_style='{SUB_FORCE_STYLE}'[outv]"
         )
         out_label = "[outv]"
     else:
-        # Rename the last overlay output to [outv] for consistency
         if has_overlays:
             filter_parts.append(f"{current}null[outv]")
             out_label = "[outv]"
         else:
             out_label = "[0:v]"
 
-    filter_complex = ";".join(filter_parts)
+    if use_audio_mix:
+        audio_filter, audio_out = _build_duck_filter(
+            f"[0:a]", f"[{narration_input_idx}:a]", narration_blocks,
+        )
+        filter_parts.append(audio_filter)
+        audio_map = audio_out
+        audio_codec = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+        print(f"  audio: mixing narration + ducked source ({len(narration_blocks)} sections)")
+    elif narration_input_idx is not None:
+        audio_map = f"{narration_input_idx}:a"
+        audio_codec = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    else:
+        audio_map = "0:a"
+        audio_codec = ["-c:a", "copy"]
 
-    cmd = [
-        "ffmpeg", "-y",
-        *inputs,
-        "-filter_complex", filter_complex,
-        "-map", out_label,
-        "-map", "0:a",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "copy",
-        "-movflags", "+faststart",
-        str(out_path),
-    ]
+    needs_filter_complex = bool(filter_parts)
+
+    if needs_filter_complex:
+        # When audio comes from the filter graph, video must too
+        if out_label == "[0:v]" and use_audio_mix:
+            filter_parts.insert(0, "[0:v]null[outv]")
+            out_label = "[outv]"
+
+        filter_complex = ";".join(filter_parts)
+        cmd = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-filter_complex", filter_complex,
+            "-map", out_label,
+            "-map", audio_map,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            *audio_codec,
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+    else:
+        cmd = [
+            "ffmpeg", "-y",
+            *inputs,
+            "-map", "0:v",
+            "-map", audio_map,
+            "-c:v", "copy",
+            *audio_codec,
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+
     print(f"compositing → {out_path.name}")
-    print(f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}")
+    print(f"  overlays: {len(overlays)}, subtitles: {'yes' if has_subs else 'no'}, "
+          f"narration: {'mix' if use_audio_mix else ('replace' if narration_input_idx else 'no')}")
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
 
@@ -601,6 +727,10 @@ def main() -> None:
         action="store_true",
         help="Skip audio loudness normalization. Default is on (-14 LUFS, -1 dBTP, LRA 11).",
     )
+    ap.add_argument(
+        "--narration", type=Path, default=None,
+        help="Narration audio file to replace source audio (overrides EDL narration field)",
+    )
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -635,21 +765,38 @@ def main() -> None:
         elif edl.get("subtitles"):
             subs_path = resolve_path(edl["subtitles"], edit_dir)
             if not subs_path.exists():
-                print(f"warning: subtitles path in EDL does not exist: {subs_path}")
-                subs_path = None
+                sys.exit(f"subtitles path in EDL does not exist: {subs_path}")
 
-    # 4. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
+    # 4. Resolve narration audio (CLI override > EDL field)
+    narration_path: Path | None = None
+    if args.narration:
+        narration_path = args.narration.resolve()
+    elif edl.get("narration"):
+        narration_path = resolve_path(edl["narration"], edit_dir)
+    if narration_path and not narration_path.exists():
+        sys.exit(f"narration audio not found: {narration_path}")
+
+    # 5. Composite (overlays + subtitles LAST) → intermediate (pre-loudnorm) path
     overlays = edl.get("overlays") or []
+    for index, overlay in enumerate(overlays, start=1):
+        if not isinstance(overlay, dict) or "file" not in overlay:
+            sys.exit(f"overlay #{index} must be an object with a 'file' path")
+        overlay_path = resolve_path(str(overlay["file"]), edit_dir)
+        if not overlay_path.exists():
+            sys.exit(f"overlay #{index} file does not exist: {overlay_path}")
+        if "start_in_output" not in overlay or "duration" not in overlay:
+            sys.exit(f"overlay #{index} needs start_in_output and duration")
     if args.no_loudnorm:
-        # Composite directly to final output
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir, narration_path)
     else:
-        # Composite to a temp file, then run loudnorm → final output
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir)
+        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path)
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
-        tmp_composite.unlink(missing_ok=True)
+        try:
+            tmp_composite.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     print(f"\ndone: {out_path} ({size_mb:.1f} MB)")

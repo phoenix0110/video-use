@@ -48,6 +48,42 @@ command -v uv >/dev/null && uv sync || pip install -e .
 
 `pyproject.toml` lists `requests`, `librosa`, `matplotlib`, `pillow`, `numpy`. No console scripts — helpers are invoked directly as `python helpers/<name>.py`.
 
+`edge-tts` is included for narration audio generation (free, no API key). If
+you are upgrading an existing environment instead of running the install above,
+add it with:
+
+```bash
+pip install edge-tts
+```
+
+### 2b. Download fonts
+
+The `fonts/` directory must contain font files referenced by `config/fonts.json`. These are gitignored (binary). Download once:
+
+```bash
+cd ~/Developer/video-use
+
+# NotoSansSC variable font (CJK, ~17 MB)
+curl -L -o fonts/NotoSansSC-VF.ttf \
+  "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf"
+
+# DejaVu Sans Mono (monospace, ~340 KB)
+curl -L -o fonts/DejaVuSansMono.ttf \
+  "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip" \
+  && unzip -jo fonts/DejaVuSansMono.ttf "dejavu-fonts-ttf-2.37/ttf/DejaVuSansMono.ttf" -d fonts/ \
+  || true
+```
+
+On Windows (PowerShell):
+
+```powershell
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf" -OutFile fonts\NotoSansSC-VF.ttf
+Invoke-WebRequest -Uri "https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.zip" -OutFile fonts\dejavu.zip
+Expand-Archive fonts\dejavu.zip -DestinationPath fonts\tmp -Force
+Copy-Item fonts\tmp\dejavu-fonts-ttf-2.37\ttf\DejaVuSansMono.ttf fonts\
+Remove-Item fonts\tmp, fonts\dejavu.zip -Recurse -Force
+```
+
 ### 3. Install ffmpeg (+ optional yt-dlp)
 
 `ffmpeg` and `ffprobe` are hard requirements. `yt-dlp` is only needed if the user wants to pull sources from URLs. Animation engines such as HyperFrames, Remotion, and Manim are installed lazily the first time a project actually needs them.

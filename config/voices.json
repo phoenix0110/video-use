@@ -1,0 +1,131 @@
+{
+  "default": "zh-CN-YunjianNeural",
+  "voices": [
+    {
+      "id": "zh-CN-YunjianNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "成熟男声，沉稳有力，适合纪录片/解说旁白"
+    },
+    {
+      "id": "zh-CN-YunxiNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "年轻男声，清晰自然，适合故事讲述"
+    },
+    {
+      "id": "zh-CN-YunyangNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "news",
+      "description": "新闻播音男声，正式专业"
+    },
+    {
+      "id": "zh-CN-YunzeNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "成熟男声，versatile，多场景适用"
+    },
+    {
+      "id": "zh-CN-YunfengNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "中年男声，适合有声书/故事"
+    },
+    {
+      "id": "zh-CN-YunhaoNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "advertisement",
+      "description": "活力男声，适合广告/宣传片"
+    },
+    {
+      "id": "zh-CN-YunxiaNeural",
+      "gender": "male",
+      "locale": "zh-CN",
+      "style": "child",
+      "description": "少年声，适合儿童/青少年内容"
+    },
+    {
+      "id": "zh-CN-XiaoxiaoNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "general",
+      "description": "通用女声，温暖亲切，适合多数场景"
+    },
+    {
+      "id": "zh-CN-XiaoyiNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "年轻女声，活泼清亮"
+    },
+    {
+      "id": "zh-CN-XiaozhenNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "news",
+      "description": "新闻播音女声，正式专业"
+    },
+    {
+      "id": "zh-CN-XiaoxuanNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "故事讲述女声，有表现力"
+    },
+    {
+      "id": "zh-CN-XiaomoNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "chat",
+      "description": "甜美女声，适合日常对话/轻松内容"
+    },
+    {
+      "id": "zh-CN-XiaoqiuNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "成熟女声，知性沉稳"
+    },
+    {
+      "id": "zh-CN-XiaoruiNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "narration",
+      "description": "年长女声，和蔼慈祥"
+    },
+    {
+      "id": "zh-CN-XiaoshuangNeural",
+      "gender": "female",
+      "locale": "zh-CN",
+      "style": "child",
+      "description": "童声女孩，适合儿童内容"
+    },
+    {
+      "id": "en-US-GuyNeural",
+      "gender": "male",
+      "locale": "en-US",
+      "style": "narration",
+      "description": "American male, warm and natural, good for narration"
+    },
+    {
+      "id": "en-US-JennyNeural",
+      "gender": "female",
+      "locale": "en-US",
+      "style": "general",
+      "description": "American female, friendly and clear"
+    },
+    {
+      "id": "en-GB-RyanNeural",
+      "gender": "male",
+      "locale": "en-GB",
+      "style": "narration",
+      "description": "British male, authoritative narration style"
+    }
+  ]
+}
