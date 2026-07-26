@@ -19,17 +19,18 @@ description: Edit any video by conversation. Transcribe, cut, color grade, gener
 
 These are the things where deviation produces silent failures or broken output. They are not taste, they are correctness. Memorize them.
 
-1. **Subtitles are applied LAST in the filter chain**, after every overlay. Otherwise overlays hide captions. Silent failure.
-2. **Per-segment extract → lossless `-c copy` concat**, not single-pass filtergraph. Otherwise you double-encode every segment when overlays are added.
-3. **30ms audio fades at every segment boundary** (`afade=t=in:st=0:d=0.03,afade=t=out:st={dur-0.03}:d=0.03`). Otherwise audible pops at every cut.
-4. **Overlays use `setpts=PTS-STARTPTS+T/TB`** to shift the overlay's frame 0 to its window start. Otherwise you see the middle of the animation during the overlay window.
-5. **Master SRT uses output-timeline offsets**: `output_time = word.start - segment_start + segment_offset`. Otherwise captions misalign after segment concat.
-6. **Never cut inside a word.** Snap every cut edge to a word boundary from the Scribe transcript.
-7. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms — padding absorbs the drift. Tighter for fast-paced, looser for cinematic.
-8. **Word-level verbatim ASR only.** Never SRT/phrase mode (loses sub-second gap data). Never normalized fillers (loses editorial signal).
-9. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
-10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
-11. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
+1. **`ffmpeg` and `ffprobe` must be on PATH.** Before running any helper, verify with `ffmpeg -version`. If missing, install it (`winget install ffmpeg` / `brew install ffmpeg` / `apt install ffmpeg`) and confirm it's accessible. Do not proceed without them.
+2. **Subtitles are applied LAST in the filter chain**, after every overlay. Otherwise overlays hide captions. Silent failure.
+3. **Per-segment extract → lossless `-c copy` concat**, not single-pass filtergraph. Otherwise you double-encode every segment when overlays are added.
+4. **30ms audio fades at every segment boundary** (`afade=t=in:st=0:d=0.03,afade=t=out:st={dur-0.03}:d=0.03`). Otherwise audible pops at every cut.
+5. **Overlays use `setpts=PTS-STARTPTS+T/TB`** to shift the overlay's frame 0 to its window start. Otherwise you see the middle of the animation during the overlay window.
+6. **Master SRT uses output-timeline offsets**: `output_time = word.start - segment_start + segment_offset`. Otherwise captions misalign after segment concat.
+7. **Never cut inside a word.** Snap every cut edge to a word boundary from the Scribe transcript.
+8. **Pad every cut edge.** Working window: 30–200ms. Scribe timestamps drift 50–100ms — padding absorbs the drift. Tighter for fast-paced, looser for cinematic.
+9. **Word-level verbatim ASR only.** Never SRT/phrase mode (loses sub-second gap data). Never normalized fillers (loses editorial signal).
+10. **Cache transcripts per source.** Never re-transcribe unless the source file itself changed.
+11. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
+12. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
 12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
@@ -63,6 +64,7 @@ First-time install lives in `install.md` (clone, deps, ffmpeg, skill registratio
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
+- `edge-tts` installed (`pip install edge-tts`) — needed for `tts.py` narration generation. No API key required.
 - `yt-dlp`, HyperFrames, Remotion, Manim installed only on first use.
 - First-use animation setup happens inside the slot directory, never at the video-use repo root. HyperFrames can be invoked with `npx --yes hyperframes ...`; Remotion can be scaffolded with `npx create-video@latest` or installed as a project-local dependency before using its `remotion render` command.
 - This skill vendors `skills/manim-video/`. Read its SKILL.md when building a Manim slot.
@@ -78,6 +80,8 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`tts.py <text> -o <out>`** — Edge TTS (free, no API key). Single text or `--from-script recap-script.md -o dir/` for batch narration. In recap mode, `--write-subtitles` writes per-section SRTs **and** an output-timeline `master.srt`; it also assembles a slot-aligned `full_narration.m4a`. `--list-voices` to browse. Default voice: `zh-CN-YunjianNeural`.
+- **`text_overlay.py --manifest <json>`** — renders a manifest of stylized on-screen text to full-frame, transparent PNG assets with Pillow. Use for static 花字; `render.py` composites those assets.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -280,9 +284,9 @@ Match the source unless the user asked for something specific. Common targets: `
   ],
   "grade": "warm_cinematic",
   "overlays": [
-    {"file": "edit/animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
+    {"file": "animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
   ],
-  "subtitles": "edit/master.srt",
+  "subtitles": "master.srt",
   "total_duration_s": 87.4
 }
 ```
@@ -303,6 +307,55 @@ Append one section per session at `<edit>/project.md`:
 ```
 
 On startup, read `project.md` if it exists and summarize the last session in one sentence before asking whether to continue.
+
+## Recap-script workflow (narration-driven editing)
+
+When the input is a **recap script** (a pre-written narration + source footage references, typically generated by another skill), the editing process differs from the standard transcript-first workflow. The recap script is the blueprint — it defines what to say, when to say it, and where to pull footage from.
+
+### Recap-script anatomy
+
+Section header format: `### <start>–<end>｜<title>`. Each section may contain `**画面**` (footage), `**旁白**` (narration), and `**花字**` (text overlays).
+
+Three kinds of timestamps coexist — never confuse them:
+
+| Element | Format | Meaning |
+|---------|--------|---------|
+| Section header | `0:00–0:15` | **Output timeline** — target duration in the final video |
+| `**画面**` bracket | `[MM:SS–MM:SS]` | **Source timeline** — where to pull footage from the original |
+| Sub-section bracket | `[MM:SS–MM:SS]` | **Source timeline, leaf level** — finer breakdown within a section |
+
+### Timing model
+
+1. **Section header = target output duration.** The delta between start and end is how long this section should be in the final video.
+2. **TTS narration extends but never compresses.** If the generated narration audio exceeds the section duration, extend the section to fit. Otherwise, preserve the section duration for visual breathing room.
+3. **Source ranges = footage selection scope.** They tell you where to look, not how long the output should be.
+
+### Nested ranges — leaf nodes only
+
+When a section has both a parent range on the `**画面**` line and child sub-sections with their own brackets, use only the leaf-level (child) ranges. The parent is a summary — including it doubles the footage.
+
+### Text overlays (`花字`)
+
+`**花字**` lines list text items separated by ` / `. Use `helpers/text_overlay.py` with a JSON manifest to render them as full-frame RGBA PNGs. Style presets are in `config/styles.json`. Position and timing decisions belong to the strategy phase, not the parser.
+
+### TTS narration audio
+
+`helpers/tts.py --from-script <script.md> -o <dir>/ --write-subtitles` generates one mp3+srt per section, a `narration_manifest.json`, `master.srt` (output-timeline aligned), and `full_narration.m4a`. Voice configuration is in `config/voices.json`.
+
+### Recap EDL construction
+
+The EDL uses a `narration` field (string path to the concatenated narration audio). When `narration_manifest.json` exists in `<narration_dir>/` (written by `tts.py`), `render.py` **mixes** narration with the source audio — ducking source to 15% during narration windows and restoring full volume in gaps. Without the manifest, narration replaces source audio entirely. Overlay PNGs from `text_overlay.py` go in the `overlays` array as `{"file": "...", "start_in_output": ..., "duration": ...}`.
+
+**Path rule:** the EDL lives in `<videos_dir>/edit/`. All relative paths for `narration`, `subtitles`, and overlay `file` fields resolve from that directory — do not prefix them with `edit/`.
+
+### Recap process (replaces standard "The process" for this workflow)
+
+1. **Parse the script.** Extract sections, source ranges (leaf only), narration text, 花字 lines.
+2. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review the timing report, `narration_manifest.json`, and `master.srt`.
+3. **Strategy confirmation.** Summarize: total duration, overflow sections, 花字 plan, grade direction. Wait for user approval.
+4. **Build EDL and assets.** Section header durations as base, extended where TTS overflows. Source ranges for footage selection. Render the approved 花字 manifest to PNG assets and reference them as file overlays.
+5. **Render.** `render.py edl.json -o out.mp4` — narration is mixed over ducked source audio (source plays at full volume in narration gaps).
+6. **Self-eval + iterate.** Same as standard workflow.
 
 ## Anti-patterns
 

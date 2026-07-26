@@ -150,23 +150,14 @@ def find_silences(words: list[dict], start: float, end: float, threshold: float 
 
 # -------- Font loading -------------------------------------------------------
 
-
-FONT_CANDIDATES = [
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/SFNSMono.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-]
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_FONTS_CONFIG = json.loads((_REPO_ROOT / "config" / "fonts.json").read_text(encoding="utf-8"))
 
 
 def load_font(size: int) -> ImageFont.ImageFont:
-    for fp in FONT_CANDIDATES:
-        if Path(fp).exists():
-            try:
-                return ImageFont.truetype(fp, size)
-            except Exception:
-                continue
+    font_path = _REPO_ROOT / _FONTS_CONFIG["mono"]
+    if font_path.exists():
+        return ImageFont.truetype(str(font_path), size)
     return ImageFont.load_default()
 
 

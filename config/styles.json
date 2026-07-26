@@ -1,0 +1,54 @@
+{
+  "label": {
+    "fill": "#FFFFFF",
+    "outline": "#16191F",
+    "stroke_width": 3,
+    "shadow": "#000000B3",
+    "shadow_offset": [7, 9],
+    "shadow_blur": 3,
+    "background": "#111827D9",
+    "background_padding": [30, 18],
+    "background_radius": 18
+  },
+  "stat": {
+    "fill": "#FFE45C",
+    "outline": "#15110A",
+    "stroke_width": 7,
+    "shadow": "#000000C0",
+    "shadow_offset": [8, 10],
+    "shadow_blur": 4
+  },
+  "alert": {
+    "fill": "#FFFFFF",
+    "outline": "#4D0710",
+    "stroke_width": 3,
+    "shadow": "#2B0609C0",
+    "shadow_offset": [8, 10],
+    "shadow_blur": 4,
+    "background": "#B71927E8",
+    "background_padding": [34, 20],
+    "background_radius": 16
+  },
+  "question": {
+    "fill": "#F8FBFF",
+    "outline": "#082B71",
+    "stroke_width": 3,
+    "shadow": "#061B4CC0",
+    "shadow_offset": [8, 10],
+    "shadow_blur": 4,
+    "background": "#1859C9E8",
+    "background_padding": [36, 21],
+    "background_radius": 24
+  },
+  "next": {
+    "fill": "#FFFFFF",
+    "outline": "#2D075A",
+    "stroke_width": 3,
+    "shadow": "#1B063BC0",
+    "shadow_offset": [8, 10],
+    "shadow_blur": 5,
+    "background": "#7C2BFFE8",
+    "background_padding": [38, 22],
+    "background_radius": 28
+  }
+}
