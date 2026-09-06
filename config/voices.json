@@ -1,5 +1,7 @@
 {
-  "default": "zh-CN-YunjianNeural",
+  "default": "zh-CN-XiaoxuanNeural",
+  "default_rate": "+15%",
+  "default_pitch": "+0Hz",
   "voices": [
     {
       "id": "zh-CN-YunjianNeural",

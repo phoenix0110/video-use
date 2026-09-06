@@ -81,7 +81,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
 - **`tts.py <text> -o <out>`** — Edge TTS (free, no API key). Single text or `--from-script recap-script.md -o dir/` for batch narration. In recap mode, `--write-subtitles` writes per-section SRTs **and** an output-timeline `master.srt`; it also assembles a slot-aligned `full_narration.m4a`. `--list-voices` to browse. Default voice: `zh-CN-YunjianNeural`.
-- **`text_overlay.py --manifest <json>`** — renders a manifest of stylized on-screen text to full-frame, transparent PNG assets with Pillow. Use for static 花字; `render.py` composites those assets.
+- **`text_overlay.py --manifest <json>`** — renders a manifest of stylized on-screen text to full-frame, transparent PNG assets with Pillow. `render.py` composites those assets as overlays.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -314,7 +314,7 @@ When the input is a **recap script** (a pre-written narration + source footage r
 
 ### Recap-script anatomy
 
-Section header format: `### <start>–<end>｜<title>`. Each section may contain `**画面**` (footage), `**旁白**` (narration), and `**花字**` (text overlays).
+Section header format: `### <start>–<end>｜<title>`. Each section may contain `**画面**` (footage) and `**旁白**` (narration).
 
 Three kinds of timestamps coexist — never confuse them:
 
@@ -328,15 +328,32 @@ Three kinds of timestamps coexist — never confuse them:
 
 1. **Section header = target output duration.** The delta between start and end is how long this section should be in the final video.
 2. **TTS narration extends but never compresses.** If the generated narration audio exceeds the section duration, extend the section to fit. Otherwise, preserve the section duration for visual breathing room.
-3. **Source ranges = footage selection scope.** They tell you where to look, not how long the output should be.
+3. **Source ranges = search zones, not edit points.** The recap-script generator provides intentionally wide windows (often 5–30× the output duration). Extracting the full range verbatim produces poor results. Your job is to scout within — and slightly beyond — these windows to find the precise clips that serve the narration.
 
 ### Nested ranges — leaf nodes only
 
 When a section has both a parent range on the `**画面**` line and child sub-sections with their own brackets, use only the leaf-level (child) ranges. The parent is a summary — including it doubles the footage.
 
-### Text overlays (`花字`)
+### Clip scouting (narrowing wide ranges to precise clips)
 
-`**花字**` lines list text items separated by ` / `. Use `helpers/text_overlay.py` with a JSON manifest to render them as full-frame RGBA PNGs. Style presets are in `config/styles.json`. Position and timing decisions belong to the strategy phase, not the parser.
+Source ranges point at a haystack; your job is to find the needles. This is the creative core of the recap workflow — the skill that the script generator cannot do for you.
+
+**1. Load source transcript.** Check for an SRT file alongside the source video (same directory, same stem or a common subtitle filename). If none is found, ask the user — they may know where the file is, or may want you to transcribe via `transcribe.py`. Do not silently fall back to transcription; do not proceed without transcript data.
+
+**2. Range analysis.** For each section, read transcript/subtitle entries that fall within the source range **plus a small buffer** (~30s before and after). The narration text (`旁白`) is your semantic anchor — it tells you *what* the footage should show. When the narration says "PhD Guy walks straight to the front," find the moment he actually does that.
+
+**3. Candidate identification.** Cross-reference transcript content against narration text to build a shortlist of candidate moments. Use `timeline_view.py` at each candidate for visual verification. In this phase, `timeline_view` is used more liberally than in standard editing — scouting a 30-minute range may require 5–10 visual checks. You are looking for:
+- The exact visual moment described by the narration
+- Emotional peaks, reactions, facial expressions that sell the beat
+- Visual variety across the section (avoid pulling all clips from one continuous stretch)
+- Clean entry and exit frames (no mid-motion cuts, no flash frames)
+
+**4. Clip selection.** Apply cut craft principles (word boundaries, silence gaps ≥ 400ms, peak preservation, speaker handoffs) to lock precise start/end times. Also decide:
+- How many clips to pull per section (one long clip vs. a montage of shorter ones)
+- Clip ordering within the section (chronological is default; reorder only when it serves the narrative)
+- Entry/exit impact (the first and last frame of each clip carry disproportionate weight)
+
+**5. Creative freedom.** You decide the clip count, arrangement, and exact boundaries. The only constraints are: clips must serve the narration, fit the section's output duration (extended if TTS overflows), and obey the Hard Rules. Everything else — pacing, rhythm, visual emphasis — is yours.
 
 ### TTS narration audio
 
@@ -350,12 +367,14 @@ The EDL uses a `narration` field (string path to the concatenated narration audi
 
 ### Recap process (replaces standard "The process" for this workflow)
 
-1. **Parse the script.** Extract sections, source ranges (leaf only), narration text, 花字 lines.
-2. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review the timing report, `narration_manifest.json`, and `master.srt`.
-3. **Strategy confirmation.** Summarize: total duration, overflow sections, 花字 plan, grade direction. Wait for user approval.
-4. **Build EDL and assets.** Section header durations as base, extended where TTS overflows. Source ranges for footage selection. Render the approved 花字 manifest to PNG assets and reference them as file overlays.
-5. **Render.** `render.py edl.json -o out.mp4` — narration is mixed over ducked source audio (source plays at full volume in narration gaps).
-6. **Self-eval + iterate.** Same as standard workflow.
+1. **Parse the script.** Extract sections, source ranges (leaf only), narration text.
+2. **Load source transcript.** Check for an SRT alongside the source video. If not found, ask the user for the subtitle file location or whether to transcribe. Do not proceed without transcript data.
+3. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review the timing report, `narration_manifest.json`, and `master.srt`.
+4. **Scout clips.** For each section: read transcript entries within the source range, use narration text as the semantic guide, inspect candidates with `timeline_view`, determine precise clip boundaries using cut craft principles. See "Clip scouting" above for the full method.
+5. **Strategy confirmation.** Summarize: total duration, overflow sections, grade direction, **and clip selection rationale** (which clips from which ranges, why each was chosen). Wait for user approval.
+6. **Build EDL and assets.** EDL ranges use the scouted clip boundaries — not the original wide source ranges. Section header durations as base, extended where TTS overflows.
+7. **Render.** `render.py edl.json -o out.mp4` — narration is mixed over ducked source audio (source plays at full volume in narration gaps).
+8. **Self-eval + iterate.** Same as standard workflow.
 
 ## Anti-patterns
 

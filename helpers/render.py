@@ -55,6 +55,31 @@ SUB_FORCE_STYLE = (
     "Alignment=2,MarginV=90"
 )
 
+LETTERBOX_PLAY_RES_Y = 288
+
+
+def _letterbox_sub_style(bottom_bar: int, frame_h: int = 1080) -> str:
+    """Compute subtitle force_style that centers text within the bottom bar.
+
+    Handles both 1-line and 2-line subtitles:
+      - Font size is capped so 2 lines + 20px padding fit inside the bar.
+      - MarginV is calculated for the average of 1 and 2 lines (1.5 lines),
+        which minimises the worst-case centering error for either case.
+    """
+    scale = frame_h / LETTERBOX_PLAY_RES_Y
+    padding_px = 20
+    max_font_px = (bottom_bar - padding_px) / 2.2
+    font_size = min(22, max(12, int(max_font_px / scale)))
+    font_px = font_size * scale
+    margin_px = max(0, bottom_bar / 2 - 0.75 * font_px)
+    margin_v = round(margin_px / scale)
+    return (
+        f"FontName=SimHei,FontSize={font_size},Bold=1,"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
+        "BorderStyle=3,Outline=2,Shadow=0,"
+        f"Alignment=2,MarginV={margin_v}"
+    )
+
 # -------- Helpers ------------------------------------------------------------
 
 
@@ -157,11 +182,17 @@ def extract_segment(
     out_path: Path,
     preview: bool = False,
     draft: bool = False,
+    letterbox: dict | None = None,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
     `-ss` before `-i` for fast accurate seeking. Scale to 1080p from 4K.
     Portrait sources (height > width) are scaled by height to preserve orientation.
+
+    When ``letterbox`` is provided (e.g. ``{"top": 70, "bottom": 100}``), the
+    video content is scaled to fit inside the area between the bars, then padded
+    to full frame with black bars at top and bottom. This covers the original
+    video's burned-in subtitles and top-of-screen text.
 
     Quality ladder:
       - final (default): 1080p libx264 fast CRF 20
@@ -171,15 +202,27 @@ def extract_segment(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     portrait = is_portrait_source(source)
-    if draft:
-        scale = "scale=-2:1280" if portrait else "scale=1280:-2"
-    else:
-        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
 
     vf_parts: list[str] = []
     if is_hdr_source(source):
         vf_parts.append(TONEMAP_CHAIN)
+
+    if draft:
+        scale = "scale=-2:1280" if portrait else "scale=1280:-2"
+    else:
+        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
     vf_parts.append(scale)
+
+    if letterbox and not portrait:
+        top_bar = letterbox.get("top", 70)
+        bottom_bar = letterbox.get("bottom", 100)
+        if draft:
+            ratio = 720 / 1080
+            top_bar = round(top_bar * ratio)
+            bottom_bar = round(bottom_bar * ratio)
+        vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black:t=fill")
+        vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black:t=fill")
+
     if grade_filter:
         vf_parts.append(grade_filter)
     vf = ",".join(vf_parts)
@@ -216,6 +259,7 @@ def extract_all_segments(
     edit_dir: Path,
     preview: bool,
     draft: bool = False,
+    letterbox: dict | None = None,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -255,7 +299,8 @@ def extract_all_segments(
         print(f"  [{i:02d}] {src_name}  {start:7.2f}-{end:7.2f}  ({duration:5.2f}s)  {note}")
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
-        extract_segment(src_path, start, duration, seg_filter, out_path, preview=preview, draft=draft)
+        extract_segment(src_path, start, duration, seg_filter, out_path,
+                        preview=preview, draft=draft, letterbox=letterbox)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -567,6 +612,7 @@ def build_final_composite(
     out_path: Path,
     edit_dir: Path,
     narration_path: Path | None = None,
+    letterbox: dict | None = None,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -630,8 +676,12 @@ def build_final_composite(
     # Subtitles LAST — Rule 1
     if has_subs:
         subs_abs = str(subtitles_path.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+        if letterbox:
+            sub_style = _letterbox_sub_style(letterbox.get("bottom", 100))
+        else:
+            sub_style = SUB_FORCE_STYLE
         filter_parts.append(
-            f"{current}subtitles='{subs_abs}':force_style='{SUB_FORCE_STYLE}'[outv]"
+            f"{current}subtitles='{subs_abs}':force_style='{sub_style}'[outv]"
         )
         out_label = "[outv]"
     else:
@@ -741,9 +791,14 @@ def main() -> None:
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 
+    # 0. Letterbox config (optional — covers burned-in subs with black bars)
+    letterbox = edl.get("letterbox")
+    if letterbox:
+        print(f"letterbox: top={letterbox.get('top', 70)}px  bottom={letterbox.get('bottom', 100)}px")
+
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft
+        edl, edit_dir, preview=args.preview, draft=args.draft, letterbox=letterbox
     )
 
     # 2. Concat → base
@@ -787,10 +842,10 @@ def main() -> None:
         if "start_in_output" not in overlay or "duration" not in overlay:
             sys.exit(f"overlay #{index} needs start_in_output and duration")
     if args.no_loudnorm:
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir, narration_path)
+        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir, narration_path, letterbox)
     else:
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path)
+        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path, letterbox)
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
         try:
