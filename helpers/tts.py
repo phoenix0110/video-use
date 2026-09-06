@@ -37,6 +37,8 @@ except ImportError:
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _VOICES_CONFIG = json.loads((_REPO_ROOT / "config" / "voices.json").read_text(encoding="utf-8"))
 DEFAULT_VOICE = _VOICES_CONFIG["default"]
+DEFAULT_RATE = _VOICES_CONFIG.get("default_rate", "+0%")
+DEFAULT_PITCH = _VOICES_CONFIG.get("default_pitch", "+0Hz")
 
 
 # -------- Core TTS ------------------------------------------------------------
@@ -46,8 +48,8 @@ async def synthesize(
     text: str,
     output: Path,
     voice: str = DEFAULT_VOICE,
-    rate: str = "+0%",
-    pitch: str = "+0Hz",
+    rate: str = DEFAULT_RATE,
+    pitch: str = DEFAULT_PITCH,
     write_subtitles: bool = False,
 ) -> Path:
     """Generate audio from text. Returns the audio output path.
@@ -86,8 +88,8 @@ def synthesize_sync(
     text: str,
     output: Path,
     voice: str = DEFAULT_VOICE,
-    rate: str = "+0%",
-    pitch: str = "+0Hz",
+    rate: str = DEFAULT_RATE,
+    pitch: str = DEFAULT_PITCH,
     write_subtitles: bool = False,
 ) -> Path:
     """Synchronous wrapper around synthesize()."""
@@ -108,8 +110,8 @@ def synthesize_cached(
     text: str,
     output: Path,
     voice: str = DEFAULT_VOICE,
-    rate: str = "+0%",
-    pitch: str = "+0Hz",
+    rate: str = DEFAULT_RATE,
+    pitch: str = DEFAULT_PITCH,
     write_subtitles: bool = False,
 ) -> Path:
     """Like synthesize_sync but skips if output exists and matches the text hash."""
@@ -467,8 +469,8 @@ def main() -> None:
         help="Parse recap-script markdown and batch-generate narration audio",
     )
     ap.add_argument("--voice", default=DEFAULT_VOICE, help=f"Voice name (default: {DEFAULT_VOICE})")
-    ap.add_argument("--rate", default="+0%", help="Speech rate (e.g. '+20%%', '-10%%')")
-    ap.add_argument("--pitch", default="+0Hz", help="Pitch adjustment (e.g. '+5Hz', '-3Hz')")
+    ap.add_argument("--rate", default=DEFAULT_RATE, help=f"Speech rate (default: {DEFAULT_RATE})")
+    ap.add_argument("--pitch", default=DEFAULT_PITCH, help=f"Pitch adjustment (default: {DEFAULT_PITCH})")
     ap.add_argument("--write-subtitles", action="store_true", help="Also write SRT alongside audio")
     ap.add_argument(
         "--master-srt", type=Path,
