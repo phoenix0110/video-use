@@ -32,6 +32,7 @@ These are the things where deviation produces silent failures or broken output. 
 11. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
 12. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
 12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
+13. **Quantize multi-segment timelines to delivery frames.** Independent fractional-duration extracts round per clip; without frame allocation, dozens of cuts accumulate picture/narration drift. `render.py` distributes the EDL total across 24fps frame boundaries and caps the composite at `total_duration_s`.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
@@ -182,7 +183,7 @@ Hard rules: apply **per-segment during extraction** (not post-concat, which re-e
 
 ## Subtitles (when requested)
 
-Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content.
+Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content. In one-line Chinese narration, treat each comma-delimited phrase as an indivisible unit: pack whole phrases into a cue, never split a phrase across adjacent cues. Omit prose-style full stops and semicolons from burned captions unless the user asks to retain them.
 
 **Worked styles** — pick, adapt, or invent:
 
@@ -274,11 +275,11 @@ Match the source unless the user asked for something specific. Common targets: `
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "sources": {"C0103": "/abs/path/C0103.MP4", "C0108": "/abs/path/C0108.MP4"},
   "ranges": [
-    {"source": "C0103", "start": 2.42, "end": 6.85,
-     "beat": "HOOK", "quote": "...", "reason": "Cleanest delivery, stops before slip at 38.46."},
+    {"source": "C0103", "start": 2.42, "duration": 4.43,
+     "cue": 1, "beat": "HOOK", "source_quote": "...", "reason": "Cleanest delivery, stops before slip at 38.46."},
     {"source": "C0108", "start": 14.30, "end": 28.90,
      "beat": "SOLUTION", "quote": "...", "reason": "Only take without the false start."}
   ],
@@ -287,11 +288,24 @@ Match the source unless the user asked for something specific. Common targets: `
     {"file": "animations/slot_1/render.mp4", "start_in_output": 0.0, "duration": 5.0}
   ],
   "subtitles": "master.srt",
+  "subtitle_layout": {
+    "max_lines": 1,
+    "bar_height": 84,
+    "bar_position": "bottom",
+    "bar_full_width": true,
+    "max_units": 48
+  },
+  "audio_mix": {
+    "source_mode": "throughout",
+    "source_under_narration": 0.08,
+    "source_in_gaps": 0.30,
+    "narration_volume": 1.0
+  },
   "total_duration_s": 87.4
 }
 ```
 
-`grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST.
+`ranges` accepts either `start` + `end` or `start` + `duration`. For narration-driven recaps, add `cue`, `beat`, and the supporting `source_quote` from the source transcript so every picture choice is auditable. `grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST. `subtitle_layout.max_lines: 1` makes `render.py` create a render-only, non-overlapping SRT whose long cues are split into consecutive one-line captions; `bar_full_width` draws one fixed bottom bar rather than a text-sized box. `audio_mix` controls original source level under narration and in narration gaps (`0.0`–`2.0` linear gain). `source_mode` is `throughout`, `narration_only`, or `muted`.
 
 ## Memory — `project.md`
 
@@ -342,6 +356,8 @@ Source ranges point at a haystack; your job is to find the needles. This is the 
 
 **2. Range analysis.** For each section, read transcript/subtitle entries that fall within the source range **plus a small buffer** (~30s before and after). The narration text (`旁白`) is your semantic anchor — it tells you *what* the footage should show. When the narration says "PhD Guy walks straight to the front," find the moment he actually does that.
 
+Before choosing clips, split the narration into the same sentence/clause cues that viewers will read. Build an explicit cue map: `output cue → narration text → source timestamp → source transcript quote → chosen visual`. Section-level correspondence is not sufficient. If the recap changes the order of facts relative to the source, reorder the source visuals to follow the narration; blindly preserving source chronology creates a correct-looking but semantically mismatched edit.
+
 **3. Candidate identification.** Cross-reference transcript content against narration text to build a shortlist of candidate moments. Use `timeline_view.py` at each candidate for visual verification. In this phase, `timeline_view` is used more liberally than in standard editing — scouting a 30-minute range may require 5–10 visual checks. You are looking for:
 - The exact visual moment described by the narration
 - Emotional peaks, reactions, facial expressions that sell the beat
@@ -361,7 +377,7 @@ Source ranges point at a haystack; your job is to find the needles. This is the 
 
 ### Recap EDL construction
 
-The EDL uses a `narration` field (string path to the concatenated narration audio). When `narration_manifest.json` exists in `<narration_dir>/` (written by `tts.py`), `render.py` **mixes** narration with the source audio — ducking source to 15% during narration windows and restoring full volume in gaps. Without the manifest, narration replaces source audio entirely. Overlay PNGs from `text_overlay.py` go in the `overlays` array as `{"file": "...", "start_in_output": ..., "duration": ...}`.
+The EDL uses a `narration` field (string path to the concatenated narration audio). When `narration_manifest.json` exists in `<narration_dir>/` (written by `tts.py`), `render.py` **mixes** narration with the source audio according to `audio_mix`. Defaults remain 15% during narration and 100% in gaps for backward compatibility. Without the manifest, narration replaces source audio entirely. Overlay PNGs from `text_overlay.py` go in the `overlays` array as `{"file": "...", "start_in_output": ..., "duration": ...}`.
 
 **Path rule:** the EDL lives in `<videos_dir>/edit/`. All relative paths for `narration`, `subtitles`, and overlay `file` fields resolve from that directory — do not prefix them with `edit/`.
 
@@ -371,8 +387,8 @@ The EDL uses a `narration` field (string path to the concatenated narration audi
 2. **Load source transcript.** Check for an SRT alongside the source video. If not found, ask the user for the subtitle file location or whether to transcribe. Do not proceed without transcript data.
 3. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review the timing report, `narration_manifest.json`, and `master.srt`.
 4. **Scout clips.** For each section: read transcript entries within the source range, use narration text as the semantic guide, inspect candidates with `timeline_view`, determine precise clip boundaries using cut craft principles. See "Clip scouting" above for the full method.
-5. **Strategy confirmation.** Summarize: total duration, overflow sections, grade direction, **and clip selection rationale** (which clips from which ranges, why each was chosen). Wait for user approval.
-6. **Build EDL and assets.** EDL ranges use the scouted clip boundaries — not the original wide source ranges. Section header durations as base, extended where TTS overflows.
+5. **Strategy confirmation.** Summarize: total duration, overflow sections, grade direction, **clip selection rationale** (which clips from which ranges, why each was chosen), whether background/source audio runs throughout or only in selected windows, its level under narration and in gaps, and whether subtitles allow one or two lines. Wait for user approval in the conversation; no separate Python dialog is needed. Record the approved values in `audio_mix` and `subtitle_layout` rather than relying on prose memory.
+6. **Build EDL and assets.** EDL ranges use the scouted clip boundaries — not the original wide source ranges. Each range records its narration `cue`, semantic `beat`, and supporting `source_quote`. Allocate range durations against narration cue windows, then verify the sum against `total_duration_s`. Section header durations remain the base, extended where TTS overflows.
 7. **Render.** `render.py edl.json -o out.mp4` — narration is mixed over ducked source audio (source plays at full volume in narration gaps).
 8. **Self-eval + iterate.** Same as standard workflow.
 

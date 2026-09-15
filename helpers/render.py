@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -58,26 +59,24 @@ SUB_FORCE_STYLE = (
 LETTERBOX_PLAY_RES_Y = 288
 
 
-def _letterbox_sub_style(bottom_bar: int, frame_h: int = 1080) -> str:
-    """Compute subtitle force_style that centers text within the bottom bar.
-
-    Handles both 1-line and 2-line subtitles:
-      - Font size is capped so 2 lines + 20px padding fit inside the bar.
-      - MarginV is calculated for the average of 1 and 2 lines (1.5 lines),
-        which minimises the worst-case centering error for either case.
-    """
+def _letterbox_sub_style(
+    bottom_bar: int,
+    frame_h: int = 1080,
+    max_lines: int = 2,
+) -> str:
+    """Compute a subtitle style centered within the full-width bottom bar."""
     scale = frame_h / LETTERBOX_PLAY_RES_Y
     padding_px = 20
-    max_font_px = (bottom_bar - padding_px) / 2.2
+    max_font_px = (bottom_bar - padding_px) / (1.1 * max_lines)
     font_size = min(22, max(12, int(max_font_px / scale)))
     font_px = font_size * scale
-    margin_px = max(0, bottom_bar / 2 - 0.75 * font_px)
+    margin_px = max(0, bottom_bar / 2 - 0.5 * font_px)
     margin_v = round(margin_px / scale)
     return (
         f"FontName=SimHei,FontSize={font_size},Bold=1,"
-        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,"
-        "BorderStyle=3,Outline=2,Shadow=0,"
-        f"Alignment=2,MarginV={margin_v}"
+        "PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H00000000,"
+        "BorderStyle=1,Outline=2,Shadow=0,WrapStyle=2,"
+        f"Alignment=2,MarginL=36,MarginR=36,MarginV={margin_v}"
     )
 
 # -------- Helpers ------------------------------------------------------------
@@ -115,6 +114,41 @@ def resolve_path(maybe_path: str, base: Path) -> Path:
     if p.is_absolute():
         return p
     return (base / p).resolve()
+
+
+def _range_duration(item: dict) -> float:
+    """Return a range duration, accepting either end or explicit duration."""
+    start = float(item["start"])
+    duration = float(item["duration"]) if "duration" in item else float(item["end"]) - start
+    if duration <= 0:
+        raise ValueError(f"range duration must be positive: {item}")
+    return duration
+
+
+def _render_durations(edl: dict, fps: int = 24) -> list[float]:
+    """Quantize range durations to frames while preserving the exact total.
+
+    Encoding many fractional-duration clips independently otherwise rounds each
+    clip upward and creates cumulative picture/narration drift after concat.
+    """
+    raw = [_range_duration(item) for item in edl["ranges"]]
+    target_seconds = float(edl.get("total_duration_s", sum(raw)))
+    target_frames = round(target_seconds * fps)
+    exact_frames = [duration * fps for duration in raw]
+    frames = [max(1, math.floor(value)) for value in exact_frames]
+    delta = target_frames - sum(frames)
+    if delta > 0:
+        order = sorted(range(len(frames)), key=lambda i: exact_frames[i] - frames[i], reverse=True)
+        for index in range(delta):
+            frames[order[index % len(order)]] += 1
+    elif delta < 0:
+        order = sorted(range(len(frames)), key=lambda i: exact_frames[i] - frames[i])
+        for index in range(-delta):
+            candidate = order[index % len(order)]
+            if frames[candidate] <= 1:
+                raise ValueError("cannot quantize ranges to requested total duration")
+            frames[candidate] -= 1
+    return [frame_count / fps for frame_count in frames]
 
 
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
@@ -214,14 +248,16 @@ def extract_segment(
     vf_parts.append(scale)
 
     if letterbox and not portrait:
-        top_bar = letterbox.get("top", 70)
-        bottom_bar = letterbox.get("bottom", 100)
+        top_bar = letterbox.get("top", 0)
+        bottom_bar = letterbox.get("bottom", 0)
         if draft:
             ratio = 720 / 1080
             top_bar = round(top_bar * ratio)
             bottom_bar = round(bottom_bar * ratio)
-        vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black:t=fill")
-        vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black:t=fill")
+        if top_bar > 0:
+            vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black:t=fill")
+        if bottom_bar > 0:
+            vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black:t=fill")
 
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -282,12 +318,12 @@ def extract_all_segments(
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
     if is_auto:
         print("  (auto-grade per segment: analyzing each range)")
-    for i, r in enumerate(ranges):
+    durations = _render_durations(edl)
+    for i, (r, duration) in enumerate(zip(ranges, durations)):
         src_name = r["source"]
         src_path = resolve_path(sources[src_name], edit_dir)
         start = float(r["start"])
-        end = float(r["end"])
-        duration = end - start
+        end = start + duration
         out_path = clips_dir / f"seg_{i:02d}_{src_name}.mp4"
 
         if is_auto:
@@ -313,7 +349,10 @@ def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -
     """Lossless concat via the concat demuxer. No re-encode."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     concat_list = edit_dir / "_concat.txt"
-    concat_list.write_text("".join(f"file '{p.resolve()}'\n" for p in segment_paths))
+    concat_list.write_text(
+        "".join(f"file '{p.resolve()}'\n" for p in segment_paths),
+        encoding="utf-8",
+    )
 
     cmd = [
         "ffmpeg", "-y",
@@ -346,6 +385,112 @@ def _srt_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+def _parse_srt_timestamp(value: str) -> float:
+    match = re.fullmatch(r"(\d+):(\d{2}):(\d{2})[,.](\d{3})", value.strip())
+    if not match:
+        raise ValueError(f"invalid SRT timestamp: {value}")
+    hours, minutes, seconds, millis = map(int, match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000
+
+
+def _text_units(text: str) -> int:
+    """Approximate display width: CJK/full-width glyphs count twice."""
+    return sum(1 if ord(char) < 128 else 2 for char in text)
+
+
+def _split_single_line_text(text: str, max_units: int) -> list[str]:
+    """Split a caption into indivisible punctuation-delimited clauses.
+
+    A phrase ending in a comma is never split across captions. Full stops and
+    semicolons act as hard timing boundaries but are omitted from the rendered
+    text; this keeps Chinese narration captions conversational rather than
+    typeset like prose.
+    """
+    text = re.sub(r"\s+", " ", text.replace("\\N", " ")).strip()
+    if not text:
+        return []
+
+    raw_clauses = re.findall(r"[^，,。；;！？!?：:]+[，,。；;！？!?：:]?", text)
+    chunks: list[str] = []
+    current = ""
+    for raw_clause in raw_clauses:
+        raw_clause = raw_clause.strip()
+        if not raw_clause:
+            continue
+        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:" else ""
+        clause = raw_clause
+        hard_break = terminal in "。.;；"
+        if terminal in "。.;；":
+            clause = raw_clause[:-1].rstrip()
+
+        candidate = f"{current}{clause}"
+        if current and _text_units(candidate) > max_units:
+            chunks.append(current)
+            current = clause
+        else:
+            current = candidate
+
+        if hard_break and current:
+            chunks.append(current)
+            current = ""
+
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk]
+
+
+def prepare_single_line_srt(
+    source: Path,
+    output: Path,
+    max_units: int = 48,
+) -> Path:
+    """Write a render-only SRT with one non-overlapping caption at a time.
+
+    Long cues are split at punctuation (or a safe width fallback), and their
+    original time window is divided proportionally by visual text width.
+    """
+    raw_blocks = re.split(r"\r?\n\s*\r?\n", source.read_text(encoding="utf-8-sig").strip())
+    entries: list[list[float | str]] = []
+    for block in raw_blocks:
+        lines = block.splitlines()
+        if len(lines) < 3 or "-->" not in lines[1]:
+            continue
+        start_text, end_text = (part.strip() for part in lines[1].split("-->", 1))
+        start = _parse_srt_timestamp(start_text)
+        end = _parse_srt_timestamp(end_text)
+        text = " ".join(line.strip() for line in lines[2:] if line.strip())
+        chunks = _split_single_line_text(text, max_units)
+        if not chunks or end <= start:
+            continue
+        weights = [max(1, _text_units(chunk)) for chunk in chunks]
+        total_weight = sum(weights)
+        cursor = start
+        for index, (chunk, weight) in enumerate(zip(chunks, weights)):
+            chunk_end = end if index == len(chunks) - 1 else cursor + (end - start) * weight / total_weight
+            entries.append([cursor, chunk_end, chunk])
+            cursor = chunk_end
+
+    entries.sort(key=lambda entry: float(entry[0]))
+    for index in range(len(entries) - 1):
+        next_start = float(entries[index + 1][0])
+        if float(entries[index][1]) > next_start:
+            entries[index][1] = next_start
+
+    lines: list[str] = []
+    for index, (start, end, text) in enumerate(entries, start=1):
+        if float(end) <= float(start):
+            continue
+        lines.extend([
+            str(index),
+            f"{_srt_timestamp(float(start))} --> {_srt_timestamp(float(end))}",
+            str(text),
+            "",
+        ])
+    output.write_text("\n".join(lines), encoding="utf-8")
+    print(f"single-line subtitles → {output.name} ({len(entries)} cues)")
+    return output
+
+
 def _words_in_range(transcript: dict, t_start: float, t_end: float) -> list[dict]:
     out: list[dict] = []
     for w in transcript.get("words", []):
@@ -374,11 +519,11 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
     entries: list[tuple[float, float, str]] = []
     seg_offset = 0.0
 
-    for r in edl["ranges"]:
+    durations = _render_durations(edl)
+    for r, seg_duration in zip(edl["ranges"], durations):
         src_name = r["source"]
         seg_start = float(r["start"])
-        seg_end = float(r["end"])
-        seg_duration = seg_end - seg_start
+        seg_end = seg_start + seg_duration
 
         tr_path = transcripts_dir / f"{src_name}.json"
         if not tr_path.exists():
@@ -386,7 +531,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
             seg_offset += seg_duration
             continue
 
-        transcript = json.loads(tr_path.read_text())
+        transcript = json.loads(tr_path.read_text(encoding="utf-8-sig"))
         words_in_seg = _words_in_range(transcript, seg_start, seg_end)
 
         # Group into 2-word chunks, break on punctuation
@@ -458,7 +603,13 @@ def measure_loudness(video_path: Path) -> dict[str, str] | None:
         "-af", filter_str,
         "-vn", "-f", "null", "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     # loudnorm prints the JSON to stderr at the end of the run
     stderr = proc.stderr
 
@@ -542,7 +693,26 @@ def apply_loudnorm_two_pass(
 # -------- Narration + source audio mixing ------------------------------------
 
 
-DUCK_VOLUME = 0.15
+DEFAULT_AUDIO_MIX = {
+    "source_mode": "throughout",
+    "source_under_narration": 0.15,
+    "source_in_gaps": 1.0,
+    "narration_volume": 1.0,
+}
+
+
+def _audio_mix_config(edl_value: dict | None) -> dict:
+    config = dict(DEFAULT_AUDIO_MIX)
+    if edl_value:
+        config.update(edl_value)
+    if config["source_mode"] not in {"throughout", "narration_only", "muted"}:
+        raise ValueError("audio_mix.source_mode must be throughout, narration_only, or muted")
+    for key in ("source_under_narration", "source_in_gaps", "narration_volume"):
+        value = float(config[key])
+        if not 0 <= value <= 2:
+            raise ValueError(f"audio_mix.{key} must be between 0 and 2")
+        config[key] = value
+    return config
 
 
 def _load_narration_manifest(narration_path: Path) -> list[dict] | None:
@@ -570,11 +740,11 @@ def _build_duck_filter(
     base_input: str,
     narration_input: str,
     blocks: list[dict],
+    audio_mix: dict,
 ) -> tuple[str, str]:
     """Build an ffmpeg audio filter that mixes narration over ducked source.
 
-    During narration windows: source at DUCK_VOLUME, narration at 1.0.
-    During gaps: source at full volume, narration silent (it's already silent).
+    Source and narration levels come from the EDL ``audio_mix`` object.
 
     Returns (filter_string, output_label).
     """
@@ -587,16 +757,19 @@ def _build_duck_filter(
         t1 = t0 + audio_dur
         duck_expr_parts.append(f"between(t,{t0:.3f},{t1:.3f})")
 
+    narration_volume = audio_mix["narration_volume"]
     if not duck_expr_parts:
-        return f"{base_input}acopy[outa]", "[outa]"
+        return f"{narration_input}volume={narration_volume}[outa]", "[outa]"
 
     duck_expr = "+".join(duck_expr_parts)
-    target = DUCK_VOLUME
-    duck_formula = f"if({duck_expr},{target},1)"
+    mode = audio_mix["source_mode"]
+    under = 0.0 if mode == "muted" else audio_mix["source_under_narration"]
+    gaps = audio_mix["source_in_gaps"] if mode == "throughout" else 0.0
+    duck_formula = f"if({duck_expr},{under},{gaps})"
 
     parts: list[str] = [
         f"{base_input}volume=eval=frame:volume='{duck_formula}'[srcducked]",
-        f"{narration_input}aresample=48000[narr48]",
+        f"{narration_input}aresample=48000,volume={narration_volume}[narr48]",
         f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[outa]",
     ]
     return ";".join(parts), "[outa]"
@@ -613,6 +786,9 @@ def build_final_composite(
     edit_dir: Path,
     narration_path: Path | None = None,
     letterbox: dict | None = None,
+    subtitle_layout: dict | None = None,
+    audio_mix: dict | None = None,
+    target_duration: float | None = None,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -677,7 +853,8 @@ def build_final_composite(
     if has_subs:
         subs_abs = str(subtitles_path.resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
         if letterbox:
-            sub_style = _letterbox_sub_style(letterbox.get("bottom", 100))
+            max_lines = int((subtitle_layout or {}).get("max_lines", 2))
+            sub_style = _letterbox_sub_style(letterbox.get("bottom", 100), max_lines=max_lines)
         else:
             sub_style = SUB_FORCE_STYLE
         filter_parts.append(
@@ -694,11 +871,17 @@ def build_final_composite(
     if use_audio_mix:
         audio_filter, audio_out = _build_duck_filter(
             f"[0:a]", f"[{narration_input_idx}:a]", narration_blocks,
+            audio_mix or DEFAULT_AUDIO_MIX,
         )
         filter_parts.append(audio_filter)
         audio_map = audio_out
         audio_codec = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
-        print(f"  audio: mixing narration + ducked source ({len(narration_blocks)} sections)")
+        mix = audio_mix or DEFAULT_AUDIO_MIX
+        print(
+            "  audio: mixing narration + source "
+            f"({len(narration_blocks)} sections; under={mix['source_under_narration']}, "
+            f"gaps={mix['source_in_gaps']})"
+        )
     elif narration_input_idx is not None:
         audio_map = f"{narration_input_idx}:a"
         audio_codec = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
@@ -725,6 +908,7 @@ def build_final_composite(
             "-pix_fmt", "yuv420p",
             *audio_codec,
             "-movflags", "+faststart",
+            *(["-t", f"{target_duration:.3f}"] if target_duration else []),
             str(out_path),
         ]
     else:
@@ -736,6 +920,7 @@ def build_final_composite(
             "-c:v", "copy",
             *audio_codec,
             "-movflags", "+faststart",
+            *(["-t", f"{target_duration:.3f}"] if target_duration else []),
             str(out_path),
         ]
 
@@ -787,14 +972,26 @@ def main() -> None:
     if not edl_path.exists():
         sys.exit(f"edl not found: {edl_path}")
 
-    edl = json.loads(edl_path.read_text())
+    edl = json.loads(edl_path.read_text(encoding="utf-8-sig"))
     edit_dir = edl_path.parent
     out_path = args.output.resolve()
 
-    # 0. Letterbox config (optional — covers burned-in subs with black bars)
-    letterbox = edl.get("letterbox")
+    # 0. Layout + audio policy. A full-width subtitle bar is part of the base
+    # render so the subtitle text can remain borderless and be composited last.
+    subtitle_layout = edl.get("subtitle_layout") or {}
+    letterbox = dict(edl.get("letterbox") or {})
+    if subtitle_layout.get("bar_full_width"):
+        if subtitle_layout.get("bar_position", "bottom") != "bottom":
+            sys.exit("subtitle_layout.bar_position currently supports only 'bottom'")
+        letterbox["bottom"] = int(subtitle_layout.get("bar_height", 84))
+    if not letterbox:
+        letterbox = None
     if letterbox:
-        print(f"letterbox: top={letterbox.get('top', 70)}px  bottom={letterbox.get('bottom', 100)}px")
+        print(f"letterbox: top={letterbox.get('top', 0)}px  bottom={letterbox.get('bottom', 0)}px")
+    try:
+        audio_mix = _audio_mix_config(edl.get("audio_mix"))
+    except (TypeError, ValueError) as exc:
+        sys.exit(str(exc))
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
@@ -821,6 +1018,13 @@ def main() -> None:
             subs_path = resolve_path(edl["subtitles"], edit_dir)
             if not subs_path.exists():
                 sys.exit(f"subtitles path in EDL does not exist: {subs_path}")
+        if subs_path and int(subtitle_layout.get("max_lines", 2)) == 1:
+            max_units = int(subtitle_layout.get("max_units", 48))
+            subs_path = prepare_single_line_srt(
+                subs_path,
+                edit_dir / f"{subs_path.stem}.single-line.srt",
+                max_units=max_units,
+            )
 
     # 4. Resolve narration audio (CLI override > EDL field)
     narration_path: Path | None = None
@@ -841,11 +1045,18 @@ def main() -> None:
             sys.exit(f"overlay #{index} file does not exist: {overlay_path}")
         if "start_in_output" not in overlay or "duration" not in overlay:
             sys.exit(f"overlay #{index} needs start_in_output and duration")
+    target_duration = float(edl["total_duration_s"]) if edl.get("total_duration_s") else None
     if args.no_loudnorm:
-        build_final_composite(base_path, overlays, subs_path, out_path, edit_dir, narration_path, letterbox)
+        build_final_composite(
+            base_path, overlays, subs_path, out_path, edit_dir, narration_path,
+            letterbox, subtitle_layout, audio_mix, target_duration,
+        )
     else:
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
-        build_final_composite(base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path, letterbox)
+        build_final_composite(
+            base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path,
+            letterbox, subtitle_layout, audio_mix, target_duration,
+        )
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
         try:
