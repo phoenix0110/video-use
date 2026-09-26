@@ -158,6 +158,7 @@ def parse_narration_blocks(script_path: Path) -> list[dict]:
                 "end": end_str,
                 "duration": _mmss_to_seconds(end_str) - _mmss_to_seconds(start_str),
                 "text": "\n".join(lines),
+                "preserve_slot": bool(re.search(r"^\s*\*\*\u539f\u58f0\u4fdd\u7559\*\*", chunk, re.MULTILINE)),
             })
 
     return blocks
@@ -212,7 +213,7 @@ async def batch_from_script(
             except (json.JSONDecodeError, KeyError):
                 pass
 
-        print(f"  [{i:02d}] {block['section']} ({block['duration']}s target)")
+        print(f"  [{i:02d}] {block['section']} ({block['duration']}s planned span)")
         await synthesize(
             block["text"], out_path, voice, rate, pitch, write_subtitles
         )
@@ -262,20 +263,23 @@ def _read_srt(path: Path) -> list[tuple[float, float, str]]:
 
 
 def _schedule_output_timeline(blocks: list[dict]) -> None:
-    """Attach output offsets while preserving recap section targets.
+    """Attach output offsets from measured narration durations.
 
-    A narration shorter than its section leaves visual breathing room, so the
-    following section must *not* move earlier. A narration that overruns its
-    target pushes following sections later. This is the timing model described
-    by the recap workflow and is intentionally not a simple MP3-duration sum.
+    Script header spans are planning estimates. Ordinary narration blocks are
+    scheduled back-to-back so unused estimates do not become silent gaps. A
+    section explicitly marked ``**\u539f\u58f0\u4fdd\u7559**`` keeps its declared slot,
+    allowing a deliberate source-led moment after narration.
     """
     cursor = 0.0
     for block in blocks:
-        declared_start = _mmss_to_seconds(block["start"])
         target_duration = float(block["duration"])
         audio_duration = float(block.get("audio_duration") or target_duration)
-        output_start = max(cursor, declared_start)
-        output_duration = max(target_duration, audio_duration)
+        output_start = cursor
+        output_duration = (
+            max(target_duration, audio_duration)
+            if block.get("preserve_slot")
+            else audio_duration
+        )
         block["output_start"] = round(output_start, 3)
         block["output_duration"] = round(output_duration, 3)
         cursor = output_start + output_duration
@@ -308,11 +312,10 @@ def build_master_srt_from_tts(blocks: list[dict], output: Path) -> Path:
 
 
 def build_full_narration(blocks: list[dict], output: Path) -> Path:
-    """Join narration clips while preserving each section's output-time slot.
+    """Join narration clips on the scheduled output timeline.
 
-    Plain concat would make later narration start too early whenever a section's
-    speech is shorter than its planned visual duration. This filter graph adds
-    silence for both intentional section gaps and unused visual breathing room.
+    Ordinary blocks follow measured narration duration. Silence is added only
+    when an explicitly marked source-led section preserves a longer slot.
     """
     if not blocks:
         raise ValueError("cannot assemble narration without blocks")
@@ -374,10 +377,10 @@ def _write_narration_manifest(
     """Persist the timing contract for EDL construction and later rerenders."""
     public_keys = (
         "section", "start", "end", "duration", "audio_path", "audio_duration",
-        "output_start", "output_duration",
+        "output_start", "output_duration", "preserve_slot",
     )
     manifest: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "script": str(script_path.resolve()),
         "voice": voice,
         "rate": rate,
@@ -405,11 +408,10 @@ def _probe_duration(audio_path: Path) -> float | None:
 
 
 def _print_timing_report(blocks: list[dict]) -> None:
-    """Print a summary comparing script target durations vs TTS audio durations."""
+    """Compare script planning spans with measured TTS durations."""
     print("\ntiming report:")
     total_target = 0.0
     total_audio = 0.0
-    overflows: list[str] = []
 
     for b in blocks:
         target = b["duration"]
@@ -417,19 +419,12 @@ def _print_timing_report(blocks: list[dict]) -> None:
         total_target += target
         if actual is not None:
             total_audio += actual
-            delta = actual - target
-            marker = ""
-            if delta > 0.5:
-                marker = f"  ⚠ +{delta:.1f}s overflow"
-                overflows.append(f"{b['section']} (+{delta:.1f}s)")
-            print(f"  {b['section']:20s}  target {target:5.1f}s  audio {actual:5.1f}s{marker}")
+            marker = "  source-led slot" if b.get("preserve_slot") else ""
+            print(f"  {b['section']:20s}  plan {target:5.1f}s  audio {actual:5.1f}s{marker}")
         else:
-            print(f"  {b['section']:20s}  target {target:5.1f}s  audio ???")
+            print(f"  {b['section']:20s}  plan {target:5.1f}s  audio ???")
 
-    print(f"\n  total target: {total_target:.1f}s  total audio: {total_audio:.1f}s")
-    if overflows:
-        print(f"  overflow sections: {', '.join(overflows)}")
-        print("  (these sections need extended source footage or faster --rate)")
+    print(f"\n  total plan: {total_target:.1f}s  total narration: {total_audio:.1f}s")
 
 
 # -------- List voices ---------------------------------------------------------

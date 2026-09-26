@@ -398,6 +398,33 @@ def _text_units(text: str) -> int:
     return sum(1 if ord(char) < 128 else 2 for char in text)
 
 
+def _split_overwide_chunk(text: str, max_units: int) -> list[str]:
+    """Split a punctuation-free overwide phrase into balanced captions."""
+    total_units = _text_units(text)
+    if total_units <= max_units:
+        return [text]
+
+    part_count = math.ceil(total_units / max_units)
+    parts: list[str] = []
+    remaining = text
+    for parts_left in range(part_count, 1, -1):
+        target = _text_units(remaining) / parts_left
+        running = 0
+        best_index = 1
+        best_distance = float("inf")
+        for index, char in enumerate(remaining[:-1], start=1):
+            running += 1 if ord(char) < 128 else 2
+            distance = abs(running - target)
+            if distance < best_distance:
+                best_index = index
+                best_distance = distance
+        parts.append(remaining[:best_index].strip())
+        remaining = remaining[best_index:].strip()
+    if remaining:
+        parts.append(remaining)
+    return [part for part in parts if part]
+
+
 def _split_single_line_text(text: str, max_units: int) -> list[str]:
     """Split a caption into indivisible punctuation-delimited clauses.
 
@@ -417,10 +444,10 @@ def _split_single_line_text(text: str, max_units: int) -> list[str]:
         raw_clause = raw_clause.strip()
         if not raw_clause:
             continue
-        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:" else ""
+        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:" else None
         clause = raw_clause
-        hard_break = terminal in "。.;；"
-        if terminal in "。.;；":
+        hard_break = terminal is not None and terminal in "。.;；"
+        if terminal is not None and terminal in "。.;；":
             clause = raw_clause[:-1].rstrip()
 
         candidate = f"{current}{clause}"
@@ -436,7 +463,15 @@ def _split_single_line_text(text: str, max_units: int) -> list[str]:
 
     if current:
         chunks.append(current)
-    return [chunk for chunk in chunks if chunk]
+    # Commas are useful inside a caption, but a caption should not end on a
+    # comma/full stop/semicolon. Strip only after layout decisions so an
+    # internal comma is preserved when adjacent clauses share one caption.
+    cleaned = [chunk.rstrip("，,。.;；").rstrip() for chunk in chunks]
+    fitted: list[str] = []
+    for chunk in cleaned:
+        if chunk:
+            fitted.extend(_split_overwide_chunk(chunk, max_units))
+    return fitted
 
 
 def prepare_single_line_srt(

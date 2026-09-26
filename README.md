@@ -17,7 +17,8 @@ Try video-use in [Browser Use Cloud](https://cloud.browser-use.com/v4?utm_campai
 - **30ms audio fades** at every cut so you never hear a pop
 - **Burns subtitles** in your style — 2-word UPPERCASE chunks by default, fully customizable
 - **Generates animation overlays** via [HyperFrames](https://github.com/heygen-com/hyperframes), [Remotion](https://www.remotion.dev/), [Manim](https://www.manim.community/), or PIL — spawned in parallel sub-agents, one per animation
-- **Self-evaluates the rendered output** at every cut boundary before showing you anything
+- **Keeps recap timing narration-led** — script estimates do not become automatic silent gaps
+- **Self-evaluates every cut boundary** for visual continuity and narration-to-picture meaning before showing you anything
 - **Persists session memory** in `project.md` so next week's session picks up where you left off
 
 ## Setup prompt
@@ -102,14 +103,14 @@ Transcribe ──> Pack ──> LLM Reasons ──> EDL ──> Render ──> S
                                                               └─ issue? fix + re-render (max 3)
 ```
 
-The self-eval loop runs `timeline_view` on the _rendered output_ at every cut boundary — catches visual jumps, audio pops, hidden subtitles. You see the preview only after it passes.
+The self-eval loop runs `timeline_view` on the _rendered output_ at every cut boundary. It checks visual jumps, audio pops, hidden subtitles, and whether the outgoing and incoming shots actually match the narration active at that moment. You see the preview only after it passes.
 
 ## Design principles
 
 1. **Text + on-demand visuals.** No frame-dumping. The transcript is the surface.
-2. **Audio is primary, visuals follow.** Cuts come from speech boundaries and silence gaps.
+2. **Audio gives structure; complete visual beats give pace.** Safe cut points come from speech boundaries, but shots stay long enough for the action or reaction to register.
 3. **Ask → confirm → execute → self-eval → persist.** Never touch the cut without strategy approval.
 4. **Zero assumptions about content type.** Look, ask, then edit.
-5. **12 hard rules, artistic freedom elsewhere.** Production-correctness is non-negotiable. Taste isn't.
+5. **Production correctness is hard; pacing remains editorial.** Every recap clip gets a start/end semantic audit, while shot length follows the material.
 
 See [`SKILL.md`](./SKILL.md) for the full production rules and editing craft.

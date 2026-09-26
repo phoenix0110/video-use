@@ -1,0 +1,81 @@
+{
+  "version": 2,
+  "sources": {
+    "source": "C:/Users/yinsh/WorkBuddy/B站二创视频/outputs/projects/turkey-14-day-travel-guide/source/source.mp4"
+  },
+  "ranges": [
+    {"source":"source","start":301.00,"duration":2.96,"cue":1,"beat":"HOOK：屋顶机位看起来像餐厅","source_quote":"the instagram rooftop photo spot","reason":"正面解释镜头，第一秒直接进入反差问题"},
+    {"source":"source","start":306.10,"duration":2.96,"cue":1,"beat":"HOOK：网页照片与实际规则","source_quote":"it is not actually a restaurant","reason":"用搜索结果强化网红屋顶预期"},
+    {"source":"source","start":313.00,"duration":2.96,"cue":1,"beat":"HOOK：收费拍照后离开","source_quote":"you pay to take pictures and leave","reason":"回到人物表情完成反差落点"},
+
+    {"source":"source","start":11.00,"duration":7.20,"cue":2,"beat":"土耳其一个月旅程总览","source_quote":"we spent a month exploring this wonderful country","reason":"伊斯坦布尔与卡帕多奇亚代表性预告镜头"},
+    {"source":"source","start":25.50,"duration":7.25,"cue":2,"beat":"十四天路线的海岸与奇岩","source_quote":"the perfect 14-day itinerary","reason":"海岸、奇岩和路线概览与旁白地点清单对应"},
+
+    {"source":"source","start":58.00,"duration":7.20,"cue":3,"beat":"抵达后确认伊斯坦布尔落脚点","source_quote":"we arrived in Istanbul","reason":"路线图与进城镜头交代第一站"},
+    {"source":"source","start":91.00,"duration":7.15,"cue":3,"beat":"塔克西姆周边街道","source_quote":"we stayed near Taksim","reason":"街道和公共交通画面对应住宿位置"},
+
+    {"source":"source","start":117.00,"duration":5.51,"cue":4,"beat":"土耳其早餐铺满桌面","source_quote":"traditional Turkish breakfast","reason":"完整展示早餐规模"},
+    {"source":"source","start":156.00,"duration":5.51,"cue":4,"beat":"独立大街边走边吃","source_quote":"Istiklal street","reason":"街道推进承接早餐后的行程"},
+    {"source":"source","start":186.00,"duration":5.52,"cue":4,"beat":"软糖和冰淇淋试吃","source_quote":"Turkish delight","reason":"人物即时反应对应第一口改口"},
+
+    {"source":"source","start":209.00,"duration":6.65,"cue":5,"beat":"加拉塔塔与登顶选择","source_quote":"Galata tower","reason":"先给塔和人物判断"},
+    {"source":"source","start":251.00,"duration":6.66,"cue":5,"beat":"一路走向港口","source_quote":"we walked down to the port","reason":"港口与街头环境对应钓鱼和摊贩"},
+    {"source":"source","start":287.00,"duration":6.66,"cue":5,"beat":"屋顶餐厅与城市景观","source_quote":"rooftop restaurants","reason":"用真正餐厅收住网红机位反差"},
+
+    {"source":"source","start":341.00,"duration":5.92,"cue":6,"beat":"美食团跨越城市两侧","source_quote":"food tour on both the European and Asian sides","reason":"市场与渡轮建立路线范围"},
+    {"source":"source","start":352.50,"duration":5.92,"cue":6,"beat":"连续品尝当地食物","source_quote":"eleven different dishes","reason":"多道食物和试吃动作对应数量感"},
+    {"source":"source","start":359.50,"duration":5.92,"cue":6,"beat":"贝兰汤成为最爱","source_quote":"Beyran soup","reason":"人物近景与汤品评价对应旁白落点"},
+
+    {"source":"source","start":388.00,"duration":7.80,"cue":7,"beat":"老城主要地标","source_quote":"Hagia Sophia and the Blue Mosque","reason":"先交代老城密集景点"},
+    {"source":"source","start":407.00,"duration":7.80,"cue":7,"beat":"地下水宫和清真寺内部","source_quote":"Basilica Cistern","reason":"较完整的内部空间镜头支撑历史感"},
+    {"source":"source","start":464.00,"duration":7.80,"cue":7,"beat":"博斯普鲁斯游船","source_quote":"Bosphorus cruise","reason":"用开阔水面和船上人物完成日夜转场"},
+
+    {"source":"source","start":604.00,"duration":7.53,"cue":8,"beat":"进入格雷梅与洞穴酒店","source_quote":"Goreme and our cave hotel","reason":"避开接驳车价格卡片，用洞穴建筑与入住画面交代落脚"},
+    {"source":"source","start":625.00,"duration":7.54,"cue":8,"beat":"高处看格雷梅日落","source_quote":"sunset over Goreme","reason":"避开原片推广卡片，用干净远景完成从城市到奇岩的画风切换"},
+
+    {"source":"source","start":632.40,"duration":6.99,"cue":9,"beat":"凌晨观景点等待热气球","source_quote":"we woke up at five in the morning","reason":"在预订网页出现前结束，保留日出前到气球升空的完整变化"},
+    {"source":"source","start":652.00,"duration":6.99,"cue":9,"beat":"热气球与日出同框","source_quote":"balloons rose with the sun","reason":"本段最关键的景观镜头"},
+    {"source":"source","start":667.00,"duration":7.00,"cue":9,"beat":"鸽子谷与爱情谷徒步","source_quote":"Pigeon Valley and Love Valley hike","reason":"人物进入岩柱环境，对应最喜欢的徒步体验"},
+
+    {"source":"source","start":702.00,"duration":5.90,"cue":10,"beat":"土耳其里维埃拉海岸","source_quote":"Turkish Riviera","reason":"用蓝色海岸直接建立惊喜"},
+    {"source":"source","start":721.50,"duration":5.90,"cue":10,"beat":"海岸路线与租车","source_quote":"rent a car from Antalya or Izmir","reason":"地图和公路交代路线选择"},
+    {"source":"source","start":734.50,"duration":5.91,"cue":10,"beat":"安塔利亚老城与瀑布","source_quote":"Antalya old town and waterfalls","reason":"抵达后的城市和自然景点对应旁白"},
+
+    {"source":"source","start":750.00,"duration":6.20,"cue":11,"beat":"卡什与海岸公路","source_quote":"our first stop was Kas","reason":"航拍与人物镜头建立卡什"},
+    {"source":"source","start":778.00,"duration":6.20,"cue":11,"beat":"第一次在地中海游泳","source_quote":"our first swim in the Mediterranean","reason":"水下动作直接对应叙述"},
+    {"source":"source","start":793.00,"duration":6.20,"cue":11,"beat":"卡普塔什海滩","source_quote":"Kaputas Beach was our favourite","reason":"海湾全景作为本段视觉高潮"},
+
+    {"source":"source","start":821.00,"duration":6.87,"cue":12,"beat":"向厄吕代尼兹前进","source_quote":"heading to Oludeniz","reason":"公路镜头承接移动"},
+    {"source":"source","start":843.00,"duration":6.87,"cue":12,"beat":"卡尔坎海边午餐","source_quote":"we stopped in Kalkan for lunch","reason":"海边餐厅和人物对应意外停留"},
+    {"source":"source","start":856.00,"duration":6.88,"cue":12,"beat":"拥挤小镇后改住费特希耶","source_quote":"we decided to stay in Fethiye","reason":"街道与到达画面体现热门但不适合过夜"},
+
+    {"source":"source","start":872.00,"duration":6.76,"cue":13,"beat":"跳过马尔马里斯继续赶路","source_quote":"we chose Bodrum over Marmaris","reason":"地图和行车建立路线选择"},
+    {"source":"source","start":899.00,"duration":6.77,"cue":13,"beat":"抵达博德鲁姆海滨","source_quote":"Bodrum became our favourite coastal town","reason":"港口与城市全景对应抵达后的惊喜"},
+    {"source":"source","start":917.00,"duration":6.77,"cue":13,"beat":"博德鲁姆出海的一天","source_quote":"the best day of our lives","reason":"船和海面镜头作为情绪高潮"},
+
+    {"source":"source","start":938.00,"duration":5.76,"cue":14,"beat":"最后一天的路线选择","source_quote":"Pamukkale or Ephesus","reason":"地图承接二选一"},
+    {"source":"source","start":949.50,"duration":5.76,"cue":14,"beat":"驶向以弗所","source_quote":"we chose Ephesus","reason":"路线和抵达建立空间变化"},
+    {"source":"source","start":956.00,"duration":5.76,"cue":14,"beat":"以弗所古城遗址","source_quote":"the ancient city was incredible","reason":"遗址人物尺度体现震撼并收住路线"},
+
+    {"source":"source","start":969.00,"duration":7.74,"cue":15,"beat":"两周旅程快速回望","source_quote":"two weeks in Turkey","reason":"城市、气球和海岸回顾对应总结"},
+    {"source":"source","start":981.00,"duration":7.74,"cue":15,"beat":"土耳其日落与人物收尾","source_quote":"there is still so much more to see","reason":"国旗、日落和人物形成自然结束"}
+  ],
+  "grade": null,
+  "overlays": [],
+  "subtitles": "master.srt",
+  "subtitle_layout": {
+    "max_lines": 1,
+    "bar_height": 92,
+    "bar_position": "bottom",
+    "bar_full_width": true,
+    "max_units": 40
+  },
+  "audio_mix": {
+    "source_mode": "throughout",
+    "source_under_narration": 0.08,
+    "source_in_gaps": 0.25,
+    "narration_volume": 1.0
+  },
+  "narration": "full_narration.m4a",
+  "total_duration_s": 261.39
+}

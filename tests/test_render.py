@@ -37,16 +37,22 @@ class SubtitleTests(unittest.TestCase):
         self.assertIn("WrapStyle=2", style)
         self.assertNotIn("BorderStyle=3", style)
 
-    def test_comma_clause_is_indivisible_and_prose_punctuation_is_removed(self):
+    def test_comma_clause_is_indivisible_and_trailing_prose_punctuation_is_removed(self):
         text = "落地第一件事不是看风景，是冲超市；一周食材一百二十五美元。"
         chunks = render._split_single_line_text(text, max_units=28)
-        self.assertIn("落地第一件事不是看风景，", chunks)
+        self.assertIn("落地第一件事不是看风景", chunks)
         self.assertNotIn("。", "".join(chunks))
         self.assertNotIn("；", "".join(chunks))
+        self.assertTrue(all(not chunk.endswith("，") for chunk in chunks))
         self.assertEqual(
             "".join(chunks),
-            "落地第一件事不是看风景，是冲超市一周食材一百二十五美元",
+            "落地第一件事不是看风景是冲超市一周食材一百二十五美元",
         )
+
+    def test_unpunctuated_caption_keeps_its_last_character(self):
+        text = "海莉却又被安排第一个下去"
+        chunks = render._split_single_line_text(text, max_units=44)
+        self.assertEqual(chunks, [text])
 
 
 class AudioMixTests(unittest.TestCase):
