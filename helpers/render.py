@@ -1003,6 +1003,20 @@ def _build_duck_filter(
             t1 = t0 + audio_dur
             override_windows.setdefault(vol, []).append((t0, t1))
 
+    # Auto-override for preserve_slot gaps: source at full volume during the
+    # gap window (after narration ends, before the next section). This is where
+    # the original audio plays in 原声保留 sections.
+    for b in blocks:
+        if not b.get("preserve_slot"):
+            continue
+        audio_dur = float(b.get("audio_duration") or 0)
+        output_dur = float(b.get("output_duration") or audio_dur)
+        if output_dur <= audio_dur + 0.5:
+            continue
+        t0_gap = float(b["output_start"]) + audio_dur
+        t1_gap = float(b["output_start"]) + output_dur
+        override_windows.setdefault(1.0, []).append((t0_gap, t1_gap))
+
     mode = audio_mix["source_mode"]
     under = 0.0 if mode == "muted" else audio_mix["source_under_narration"]
     gaps = audio_mix["source_in_gaps"] if mode == "throughout" else 0.0
