@@ -36,6 +36,10 @@ These are the things where deviation produces silent failures or broken output. 
 14. **Narration-driven recap clips require a full boundary audit.** Check the first and last subtitle entry and the first and last visual frame of every selected EDL range. A range passes only when its entrance already supports the active narration cue and its exit completes that cue without introducing an unexplained new event.
 15. **Audit every burned subtitle on the rendered output.** Compare the render-only SRT with the master text after applying only the approved punctuation cleanup, then inspect one rendered frame from every cue. Fail the render if any character is missing, text touches or crosses the safe horizontal margins, a one-line cue wraps, or a cue ends with a comma, full stop, or semicolon unless the user explicitly asked to retain it.
 16. **Minimum clip duration is 2 seconds.** No EDL range may be shorter than 2s in the final output. If a candidate clip is under 2s, either extend it to include the surrounding action, merge it into an adjacent range, or drop it entirely. This applies regardless of the clip's narrative importance.
+17. **Chinese captions may never be split by character count.** Break only at authored semantic boundaries. Do not divide a word, name, fixed expression, number, or conjunction across adjacent cues. If a one-line cue is too wide and no approved boundary exists, fail the render and revise the cue; never guess by bisecting the string.
+18. **Source-led dialogue must be complete and fully translated.** Select a complete scene with a clean spoken entry and exit. Every audible utterance inside the approved source-led window needs a corresponding subtitle or an explicitly approved omission. A representative quote or summary may not stand in for the rest of the dialogue.
+19. **Narration-driven recaps: the orchestrating SOP decides when to pause for user approval.** This skill provides the caption-picture review artifact (see Recap process step 7) but does not mandate its own confirmation gate. The calling workflow (e.g. `video-recap-sop`) owns the approval timing.
+20. **Narration must start when its visual starts.** `tts.py` generates contiguous audio where each section's speech immediately follows the previous section's. But visual clips have their own durations from the source video. If the narration audio is assembled without gaps, each section's speech will drift ahead of its visual—the viewer hears about topic B while still seeing topic A. After the EDL is finalized and visual clip durations are known, recalculate each narration section's `output_start` in the manifest to equal the cumulative visual duration up to that section, then reassemble the narration audio with silence gaps between sections. Each section's narration begins when its visual begins; the gap between sections gives the viewer a natural breathing pause.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
@@ -190,7 +194,9 @@ Hard rules: apply **per-segment during extraction** (not post-concat, which re-e
 
 ## Subtitles (when requested)
 
-Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content. In one-line Chinese narration, treat each comma-delimited phrase as an indivisible unit: pack whole phrases into a cue, never split a phrase across adjacent cues. When a rendered cue would end on a comma, full stop, or semicolon, omit that trailing mark while preserving commas that remain inside the cue. Retain other punctuation according to the requested style.
+Subtitles have three dimensions worth reasoning about: **chunking** (1/2/3/sentence per line), **case** (UPPER/Title/Natural), and **placement** (margin from bottom). The right combo depends on content. In one-line Chinese narration, treat each comma-delimited phrase as an indivisible unit: pack whole phrases into a cue, never split a phrase or lexical word across adjacent cues. A displayed cue must be a complete sentence or a complete semantic clause that makes sense on its own. When a rendered cue would end on a comma, full stop, or semicolon, omit that trailing mark while preserving punctuation that remains inside the cue. Retain question and exclamation marks when they carry meaning.
+
+For narration-driven recaps, author the final one-line cues before rendering and set `subtitle_layout.approved_cues: true`. In this mode the renderer validates width, overlap, and forbidden trailing punctuation but does not re-chunk the approved text. If a cue fails, return to the review artifact and revise it; the renderer must not silently alter user-approved wording.
 
 **Worked styles** — pick, adapt, or invent:
 
@@ -300,19 +306,24 @@ Match the source unless the user asked for something specific. Common targets: `
     "bar_height": 84,
     "bar_position": "bottom",
     "bar_full_width": true,
-    "max_units": 48
+    "max_units": 48,
+    "approved_cues": true
   },
   "audio_mix": {
     "source_mode": "throughout",
     "source_under_narration": 0.08,
     "source_in_gaps": 0.30,
-    "narration_volume": 1.0
+    "narration_volume": 1.0,
+    "cue_source_volume": {
+      "1": 1.0,
+      "3": 1.0
+    }
   },
   "total_duration_s": 87.4
 }
 ```
 
-`ranges` accepts either `start` + `end` or `start` + `duration`. For narration-driven recaps, add `cue`, `beat`, and the supporting `source_quote` from the source transcript so every picture choice is auditable. `grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST. `subtitle_layout.max_lines: 1` makes `render.py` create a render-only, non-overlapping SRT whose long cues are split into consecutive one-line captions; `bar_full_width` draws one fixed bottom bar rather than a text-sized box. `audio_mix` controls original source level under narration and in narration gaps (`0.0`–`2.0` linear gain). `source_mode` is `throughout`, `narration_only`, or `muted`.
+`ranges` accepts either `start` + `end` or `start` + `duration`. For narration-driven recaps, add `cue`, `beat`, and the supporting `source_quote` from the source transcript so every picture choice is auditable. `grade` is a preset name or raw ffmpeg filter. `overlays` are rendered animation clips. `subtitles` is optional and applied LAST. `subtitle_layout.max_lines: 1` makes `render.py` create a render-only, non-overlapping SRT whose long cues are split into consecutive one-line captions; `bar_full_width` draws one fixed bottom bar rather than a text-sized box. `audio_mix` controls original source level under narration and in narration gaps (`0.0`–`2.0` linear gain). `source_mode` is `throughout`, `narration_only`, or `muted`. `cue_source_volume` is an optional per-cue override dict (`{"<cue_num>": <0.0–2.0>}`) that forces the source volume to that value during the cue's output window — use this for `**原声保留**` segments where the original audio must stay at full volume while Chinese narration plays underneath (the standard `source_under_narration` would otherwise duck the original to 0.08 and make it inaudible).
 
 ## Memory — `project.md`
 
@@ -351,6 +362,7 @@ Three kinds of timestamps coexist — never confuse them:
 2. **Measured narration sets the ordinary section length.** Extra time belongs only to a deliberate source-led moment or a reaction that completes the beat.
 3. **A source-led moment must be explicit.** Mark a section with `**原声保留**` only when the original clip contains a self-contained statement, demonstration, reaction, or dramatic event that is stronger in its own voice. Its entry, full event, and exit must all be preserved. `tts.py` keeps the declared slot only for these marked sections; ordinary sections collapse to measured narration duration.
    After scouting the exact source-led excerpt, make its slot equal to the narration audio plus that excerpt's complete playback time, then rerun `tts.py`. Cached speech is reused while the master narration and subtitles receive corrected offsets.
+   The script's representative `原话` is only a scouting hint. Before approval, transcribe the exact selected source-led window from entry to exit and translate every audible utterance. If the current boundary enters after speech has begun or exits before a response finishes, extend or move the boundary even when that increases the runtime.
 4. **Source ranges = search zones, not edit points.** The recap-script generator may provide wide windows. Scout within — and slightly beyond — them to find the precise clips that serve the narration.
 
 ### Nested ranges — leaf nodes only
@@ -397,13 +409,16 @@ The EDL uses a `narration` field (string path to the concatenated narration audi
 
 1. **Parse the script.** Extract sections, source ranges (leaf only), narration text.
 2. **Load source transcript.** Check for an SRT alongside the source video. If not found, ask the user for the subtitle file location or whether to transcribe. Do not proceed without transcript data.
-3. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review measured cue timings, `narration_manifest.json`, and `master.srt`; ordinary sections should be contiguous rather than padded to estimates.
+3. **Generate narration audio + captions.** `tts.py --from-script --write-subtitles`. Review measured cue timings, `narration_manifest.json`, and `master.srt`; ordinary sections should be contiguous rather than padded to estimates. After master.srt is finalized, inject Chinese translation cues for every 原声保留 gap window (tts.py only generates subtitles for narration lines; source-led segments need their translations added separately using the gap windows from `narration_manifest.json`).
 4. **Scout clips.** For each section: read transcript entries within the source range, use narration text as the semantic guide, inspect candidates with `timeline_view`, and choose complete visual beats instead of maximizing shot count.
 5. **Strategy confirmation.** Summarize: overall pacing, clip-selection rationale, which moments—if any—will be source-led, background/source-audio behavior, source level under narration and in gaps, and whether subtitles allow one or two lines. Wait for user approval in the conversation; no separate Python dialog is needed. Record approved values in `audio_mix` and `subtitle_layout`.
-6. **Build the cue map and EDL.** Use actual narration cue windows. Every range records its narration `cue`, semantic `beat`, and supporting `source_quote`; also retain the first/last transcript evidence used to approve its boundaries. The ranges must cover the narration through its measured end. For a source-led section, correct the slot to its exact selected excerpt and rebuild the cached TTS timeline. Do not fill unused script-header time.
-7. **Boundary audit.** Inspect the start and end of every selected range against both transcript and frames. Then review the assembled body for overly frequent cuts and under-explained transitions.
-8. **Render.** `render.py edl.json -o out.mp4`. Source audio becomes prominent only in approved source-led moments; incidental gaps are removed rather than filled.
-9. **Self-eval + iterate.** Apply the rendered-output boundary review to every cut, then check the whole sequence at normal speed for comprehension and flow.
+6. **Build the cue map and EDL, then align narration to the visual timeline.** Use actual narration cue windows. Every range records its narration `cue`, semantic `beat`, and supporting `source_quote`; also retain the first/last transcript evidence used to approve its boundaries. The ranges must cover the narration through its measured end. For a source-led section, correct the slot to its exact selected excerpt and rebuild the cached TTS timeline. Do not fill unused script-header time.
+   After the EDL ranges are finalized, align the narration to the visual timeline (Hard Rule 20): group visual ranges by narration section, sum each section's visual duration, and recalculate `output_start` in the manifest so each section's narration begins at the cumulative visual position—not at the end of the previous section's audio. Reassemble `full_narration.m4a` with silence gaps so the speech in each section starts when its visual starts. Regenerate `master.srt` with the corrected timestamps, then inject translation cues for 原声保留 gaps.
+7. **Author the caption-picture review.** Produce an output-timeline document grouped by section. For every visual range list: source timestamps, what the viewer sees, every final displayed caption in order, and the boundary evidence. For every source-led range also list the full original transcript and line-by-line Chinese translation for the exact selected window. Mark any intentionally inaudible, uncertain, or omitted speech explicitly.
+8. **Hand off for user confirmation (if orchestrator requires it).** The orchestrating SOP (e.g. `video-recap-sop`) decides whether and when to present the review artifact to the user. When it does, verify: wording, complete sentences/semantic clauses, picture-caption correspondence, full source-dialogue coverage, and any intended omissions. After approval, freeze the caption text and set `subtitle_layout.approved_cues: true`. Any later wording or source-window change invalidates this approval and requires a new review.
+9. **Boundary audit.** Inspect the start and end of every selected range against both transcript and frames. Then review the assembled body for overly frequent cuts and under-explained transitions.
+10. **Render.** `render.py edl.json -o out.mp4`. Source audio becomes prominent only in approved source-led moments; incidental gaps are removed rather than filled.
+11. **Self-eval + iterate.** Apply the rendered-output boundary review to every cut, then check the whole sequence at normal speed for comprehension and flow.
 
 ## Anti-patterns
 

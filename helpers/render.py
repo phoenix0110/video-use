@@ -217,6 +217,9 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
     letterbox: dict | None = None,
+    output_width: int = 1920,
+    output_height: int = 1080,
+    fps: int = 24,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -242,9 +245,12 @@ def extract_segment(
         vf_parts.append(TONEMAP_CHAIN)
 
     if draft:
-        scale = "scale=-2:1280" if portrait else "scale=1280:-2"
-    else:
-        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
+        output_width, output_height = 1280, 720
+    scale = (
+        f"scale=-2:{output_height}"
+        if portrait
+        else f"scale={output_width}:-2"
+    )
     vf_parts.append(scale)
 
     if letterbox and not portrait:
@@ -255,9 +261,11 @@ def extract_segment(
             top_bar = round(top_bar * ratio)
             bottom_bar = round(bottom_bar * ratio)
         if top_bar > 0:
-            vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black:t=fill")
+            opacity = float(letterbox.get("opacity", 1.0))
+            vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black@{opacity}:t=fill")
         if bottom_bar > 0:
-            vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black:t=fill")
+            opacity = float(letterbox.get("opacity", 1.0))
+            vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black@{opacity}:t=fill")
 
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -282,7 +290,7 @@ def extract_segment(
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
+        "-pix_fmt", "yuv420p", "-r", str(fps),
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
@@ -318,7 +326,10 @@ def extract_all_segments(
     print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
     if is_auto:
         print("  (auto-grade per segment: analyzing each range)")
-    durations = _render_durations(edl)
+    fps = int(edl.get("fps", 24))
+    output_width = int(edl.get("output_width", 1920))
+    output_height = int(edl.get("output_height", 1080))
+    durations = _render_durations(edl, fps=fps)
     for i, (r, duration) in enumerate(zip(ranges, durations)):
         src_name = r["source"]
         src_path = resolve_path(sources[src_name], edit_dir)
@@ -336,7 +347,9 @@ def extract_all_segments(
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
         extract_segment(src_path, start, duration, seg_filter, out_path,
-                        preview=preview, draft=draft, letterbox=letterbox)
+                        preview=preview, draft=draft, letterbox=letterbox,
+                        output_width=output_width, output_height=output_height,
+                        fps=fps)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -399,52 +412,64 @@ def _text_units(text: str) -> int:
 
 
 def _split_overwide_chunk(text: str, max_units: int) -> list[str]:
-    """Split a punctuation-free overwide phrase into balanced captions."""
+    """Split an overwide phrase only at explicit word boundaries.
+
+    Chinese text without spaces has no reliable lexical boundary available to
+    this renderer. Splitting it by character can bisect words such as ``甚至``.
+    In that case fail loudly so an editor can author a complete, approved cue.
+    """
     total_units = _text_units(text)
     if total_units <= max_units:
         return [text]
-
-    part_count = math.ceil(total_units / max_units)
+    words = text.split()
+    if len(words) < 2:
+        raise ValueError(
+            "overwide caption has no safe word boundary; author an approved "
+            f"cue instead of character-splitting: {text!r} ({total_units}>{max_units})"
+        )
     parts: list[str] = []
-    remaining = text
-    for parts_left in range(part_count, 1, -1):
-        target = _text_units(remaining) / parts_left
-        running = 0
-        best_index = 1
-        best_distance = float("inf")
-        for index, char in enumerate(remaining[:-1], start=1):
-            running += 1 if ord(char) < 128 else 2
-            distance = abs(running - target)
-            if distance < best_distance:
-                best_index = index
-                best_distance = distance
-        parts.append(remaining[:best_index].strip())
-        remaining = remaining[best_index:].strip()
-    if remaining:
-        parts.append(remaining)
-    return [part for part in parts if part]
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and _text_units(candidate) > max_units:
+            parts.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    if any(_text_units(part) > max_units for part in parts):
+        raise ValueError(f"caption word exceeds safe width: {text!r}")
+    return parts
 
 
 def _split_single_line_text(text: str, max_units: int) -> list[str]:
     """Split a caption into indivisible punctuation-delimited clauses.
 
-    A phrase ending in a comma is never split across captions. Full stops and
-    semicolons act as hard timing boundaries but are omitted from the rendered
-    text; this keeps Chinese narration captions conversational rather than
-    typeset like prose.
+    Recognized delimiters (split points):
+      - Soft: ，  ,  、  ——  —  ：  :
+      - Hard (also stripped from display): 。  .  ;  ；
+
+    A phrase ending in a comma or enumeration mark is never split across
+    captions. Full stops and semicolons act as hard timing boundaries but are
+    omitted from the rendered text; this keeps Chinese narration captions
+    conversational rather than typeset like prose.
     """
     text = re.sub(r"\s+", " ", text.replace("\\N", " ")).strip()
     if not text:
         return []
 
-    raw_clauses = re.findall(r"[^，,。；;！？!?：:]+[，,。；;！？!?：:]?", text)
+    # Normalize double em-dash to a single delimiter token before splitting
+    text = text.replace("——", "—")
+
+    raw_clauses = re.findall(r"[^，,。；;！？!?：:、—]+[，,。；;！？!?：:、—]?", text)
     chunks: list[str] = []
     current = ""
     for raw_clause in raw_clauses:
         raw_clause = raw_clause.strip()
         if not raw_clause:
             continue
-        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:" else None
+        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:、—" else None
         clause = raw_clause
         hard_break = terminal is not None and terminal in "。.;；"
         if terminal is not None and terminal in "。.;；":
@@ -463,10 +488,10 @@ def _split_single_line_text(text: str, max_units: int) -> list[str]:
 
     if current:
         chunks.append(current)
-    # Commas are useful inside a caption, but a caption should not end on a
-    # comma/full stop/semicolon. Strip only after layout decisions so an
-    # internal comma is preserved when adjacent clauses share one caption.
-    cleaned = [chunk.rstrip("，,。.;；").rstrip() for chunk in chunks]
+    # Commas and enumeration marks are useful inside a caption, but a caption
+    # should not end on them. Strip only after layout decisions so internal
+    # punctuation is preserved when adjacent clauses share one caption.
+    cleaned = [chunk.rstrip("，,。.;；、—").rstrip() for chunk in chunks]
     fitted: list[str] = []
     for chunk in cleaned:
         if chunk:
@@ -478,6 +503,7 @@ def prepare_single_line_srt(
     source: Path,
     output: Path,
     max_units: int = 48,
+    approved_cues: bool = False,
 ) -> Path:
     """Write a render-only SRT with one non-overlapping caption at a time.
 
@@ -494,7 +520,17 @@ def prepare_single_line_srt(
         start = _parse_srt_timestamp(start_text)
         end = _parse_srt_timestamp(end_text)
         text = " ".join(line.strip() for line in lines[2:] if line.strip())
-        chunks = _split_single_line_text(text, max_units)
+        if approved_cues:
+            units = _text_units(text)
+            if units > max_units:
+                raise ValueError(
+                    f"approved cue exceeds one-line width ({units}>{max_units}): {text!r}"
+                )
+            if text.endswith(("，", ",", "。", ".", "；", ";")):
+                raise ValueError(f"approved cue has forbidden trailing punctuation: {text!r}")
+            chunks = [text]
+        else:
+            chunks = _split_single_line_text(text, max_units)
         if not chunks or end <= start:
             continue
         weights = [max(1, _text_units(chunk)) for chunk in chunks]
@@ -506,6 +542,12 @@ def prepare_single_line_srt(
             cursor = chunk_end
 
     entries.sort(key=lambda entry: float(entry[0]))
+    if approved_cues:
+        for index in range(len(entries) - 1):
+            if float(entries[index][1]) > float(entries[index + 1][0]) + 0.001:
+                raise ValueError(
+                    f"approved cues overlap at entries {index + 1} and {index + 2}"
+                )
     for index in range(len(entries) - 1):
         next_start = float(entries[index + 1][0])
         if float(entries[index][1]) > next_start:
@@ -554,7 +596,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
     entries: list[tuple[float, float, str]] = []
     seg_offset = 0.0
 
-    durations = _render_durations(edl)
+    durations = _render_durations(edl, fps=int(edl.get("fps", 24)))
     for r, seg_duration in zip(edl["ranges"], durations):
         src_name = r["source"]
         seg_start = float(r["start"])
@@ -758,6 +800,7 @@ def _load_narration_manifest(narration_path: Path) -> list[dict] | None:
     candidates = [
         narration_path.parent / "narration" / "narration_manifest.json",
         narration_path.parent / "narration_manifest.json",
+        narration_path.parent / "narration_manifest.approved.json",
     ]
     for p in candidates:
         if p.exists():
@@ -776,10 +819,17 @@ def _build_duck_filter(
     narration_input: str,
     blocks: list[dict],
     audio_mix: dict,
+    ranges: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build an ffmpeg audio filter that mixes narration over ducked source.
 
     Source and narration levels come from the EDL ``audio_mix`` object.
+
+    Cue-level override: if a range's cue appears in
+    ``audio_mix.cue_source_volume`` (dict mapping cue index → source volume),
+    that volume replaces the standard under/gap duck for that cue's output
+    window. Use this for source-led sections where the original audio must be
+    at full volume while narration plays underneath.
 
     Returns (filter_string, output_label).
     """
@@ -793,14 +843,57 @@ def _build_duck_filter(
         duck_expr_parts.append(f"between(t,{t0:.3f},{t1:.3f})")
 
     narration_volume = audio_mix["narration_volume"]
-    if not duck_expr_parts:
-        return f"{narration_input}volume={narration_volume}[outa]", "[outa]"
 
-    duck_expr = "+".join(duck_expr_parts)
+    # Collect cue-level source-volume override windows
+    cue_overrides: dict[str, float] = audio_mix.get("cue_source_volume") or {}
+    override_windows: dict[float, list[tuple[float, float]]] = {}
+    if ranges and cue_overrides:
+        for r in ranges:
+            cue = r.get("cue")
+            if cue is None:
+                continue
+            cue_key = str(cue)
+            if cue_key not in cue_overrides:
+                continue
+            vol = float(cue_overrides[cue_key])
+            idx = cue - 1
+            if idx < 0 or idx >= len(blocks):
+                continue
+            b = blocks[idx]
+            audio_dur = float(b.get("audio_duration") or 0)
+            if audio_dur <= 0:
+                continue
+            t0 = float(b["output_start"])
+            t1 = t0 + audio_dur
+            override_windows.setdefault(vol, []).append((t0, t1))
+
     mode = audio_mix["source_mode"]
     under = 0.0 if mode == "muted" else audio_mix["source_under_narration"]
     gaps = audio_mix["source_in_gaps"] if mode == "throughout" else 0.0
-    duck_formula = f"if({duck_expr},{under},{gaps})"
+
+    if not duck_expr_parts and not override_windows:
+        return f"{narration_input}volume={narration_volume}[outa]", "[outa]"
+
+    # Build source-volume formula:
+    # priority: cue override > standard narration window > gap
+    # nested if(cond, vol, if(cond, vol, ...))
+    inner_parts: list[str] = []
+    # Innermost: standard narration window check
+    if duck_expr_parts:
+        duck_expr = "+".join(duck_expr_parts)
+        inner_parts.append(f"if(gt({duck_expr},0),{under},{gaps})")
+    else:
+        inner_parts.append(f"{gaps}")
+    # Wrap with each override window
+    for vol, windows in sorted(override_windows.items(), reverse=True):
+        cond_parts = [f"between(t,{t0:.3f},{t1:.3f})" for t0, t1 in windows]
+        cond = "+".join(cond_parts)
+        # Replace the innermost formula with: if(in_override, vol, innermost)
+        innermost = inner_parts[-1]
+        new_formula = f"if(gt({cond},0),{vol},{innermost})"
+        inner_parts[-1] = new_formula
+
+    duck_formula = inner_parts[-1]
 
     parts: list[str] = [
         f"{base_input}volume=eval=frame:volume='{duck_formula}'[srcducked]",
@@ -824,6 +917,7 @@ def build_final_composite(
     subtitle_layout: dict | None = None,
     audio_mix: dict | None = None,
     target_duration: float | None = None,
+    edl_ranges: list[dict] | None = None,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -842,6 +936,21 @@ def build_final_composite(
     narration_blocks: list[dict] | None = None
     if has_narration:
         narration_blocks = _load_narration_manifest(narration_path)
+
+    requested_mix = audio_mix or DEFAULT_AUDIO_MIX
+    if (
+        has_narration
+        and narration_blocks is None
+        and requested_mix["source_mode"] == "throughout"
+        and (
+            float(requested_mix["source_under_narration"]) > 0
+            or float(requested_mix["source_in_gaps"]) > 0
+        )
+    ):
+        raise FileNotFoundError(
+            "narration manifest is required when source audio must be mixed; "
+            "refusing to replace the source track silently"
+        )
 
     use_audio_mix = has_narration and narration_blocks is not None
 
@@ -907,6 +1016,7 @@ def build_final_composite(
         audio_filter, audio_out = _build_duck_filter(
             f"[0:a]", f"[{narration_input_idx}:a]", narration_blocks,
             audio_mix or DEFAULT_AUDIO_MIX,
+            edl_ranges,
         )
         filter_parts.append(audio_filter)
         audio_map = audio_out
@@ -1019,6 +1129,7 @@ def main() -> None:
         if subtitle_layout.get("bar_position", "bottom") != "bottom":
             sys.exit("subtitle_layout.bar_position currently supports only 'bottom'")
         letterbox["bottom"] = int(subtitle_layout.get("bar_height", 84))
+        letterbox["opacity"] = float(subtitle_layout.get("bar_opacity", 1.0))
     if not letterbox:
         letterbox = None
     if letterbox:
@@ -1059,6 +1170,7 @@ def main() -> None:
                 subs_path,
                 edit_dir / f"{subs_path.stem}.single-line.srt",
                 max_units=max_units,
+                approved_cues=bool(subtitle_layout.get("approved_cues", False)),
             )
 
     # 4. Resolve narration audio (CLI override > EDL field)
@@ -1081,16 +1193,19 @@ def main() -> None:
         if "start_in_output" not in overlay or "duration" not in overlay:
             sys.exit(f"overlay #{index} needs start_in_output and duration")
     target_duration = float(edl["total_duration_s"]) if edl.get("total_duration_s") else None
+    edl_ranges = edl.get("ranges")
     if args.no_loudnorm:
         build_final_composite(
             base_path, overlays, subs_path, out_path, edit_dir, narration_path,
             letterbox, subtitle_layout, audio_mix, target_duration,
+            edl_ranges,
         )
     else:
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
         build_final_composite(
             base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path,
             letterbox, subtitle_layout, audio_mix, target_duration,
+            edl_ranges,
         )
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
