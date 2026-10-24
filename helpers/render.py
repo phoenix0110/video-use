@@ -27,6 +27,7 @@ import math
 import re
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 try:
@@ -125,7 +126,7 @@ def _range_duration(item: dict) -> float:
     return duration
 
 
-def _render_durations(edl: dict, fps: int = 24) -> list[float]:
+def _render_durations(edl: dict, fps: float = 24) -> list[float]:
     """Quantize range durations to frames while preserving the exact total.
 
     Encoding many fractional-duration clips independently otherwise rounds each
@@ -149,6 +150,20 @@ def _render_durations(edl: dict, fps: int = 24) -> list[float]:
                 raise ValueError("cannot quantize ranges to requested total duration")
             frames[candidate] -= 1
     return [frame_count / fps for frame_count in frames]
+
+
+def resolve_subtitles_path(maybe_path: str, edit_dir: Path) -> Path:
+    """Resolve the EDL's subtitles path: relative to the EDL's directory, else the
+    current directory (agents often write "edit/master.srt"). A missing file is an
+    error: rendering on without it silently ships a video with no captions."""
+    candidates = [resolve_path(maybe_path, edit_dir)]
+    if not Path(maybe_path).is_absolute():
+        candidates.append(Path(maybe_path).resolve())
+    for c in candidates:
+        if c.exists():
+            return c
+    tried = ", ".join(str(c) for c in candidates)
+    sys.exit(f"subtitles file in EDL not found (tried {tried}). Fix the path or pass --no-subtitles.")
 
 
 # -------- HDR → SDR tone mapping (HLG / PQ sources) --------------------------
@@ -191,18 +206,99 @@ def is_hdr_source(video: Path) -> bool:
 
 
 def is_portrait_source(video: Path) -> bool:
-    """Return True if the video's height > width (portrait / vertical)."""
+    """Return True if the displayed video is portrait, including rotation."""
     try:
         out = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height",
-             "-of", "csv=p=0", str(video)],
+             "-show_entries",
+             "stream=width,height:stream_side_data=rotation",
+             "-of", "json", str(video)],
             capture_output=True, text=True, check=True,
         )
-        w, h = map(int, out.stdout.strip().split(","))
+        streams = json.loads(out.stdout).get("streams") or []
+        if not streams:
+            return False
+        stream = streams[0]
+        w, h = int(stream["width"]), int(stream["height"])
+
+        # ffmpeg autorotates display-matrix side data before applying filters.
+        # Swap coded dimensions for quarter-turns so the scale axis is selected
+        # from the dimensions the filter actually sees. A plain metadata tag is
+        # intentionally ignored because it does not guarantee autorotation.
+        rotation = 0
+        for side_data in stream.get("side_data_list") or []:
+            if side_data.get("rotation") is not None:
+                rotation = side_data["rotation"]
+                break
+        if int(round(float(rotation))) % 360 in (90, 270):
+            w, h = h, w
         return h > w
-    except Exception:
+    except (
+        subprocess.CalledProcessError,
+        json.JSONDecodeError,
+        OSError,
+        OverflowError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
         return False
+
+
+def parse_fps(value: str) -> str:
+    """Validate and canonicalize an ffmpeg frame rate."""
+    text = value.strip()
+    if len(text) > 32 or not re.fullmatch(
+        r"(?:[0-9]+(?:\.[0-9]+)?|[0-9]+/[0-9]+)", text
+    ):
+        raise argparse.ArgumentTypeError(
+            "FPS must be a positive number or rational, e.g. 30 or 30000/1001"
+        )
+    try:
+        rate = Fraction(text)
+    except (ValueError, ZeroDivisionError) as exc:
+        raise argparse.ArgumentTypeError(
+            "FPS must be a positive number or rational, e.g. 30 or 30000/1001"
+        ) from exc
+    if rate <= 0:
+        raise argparse.ArgumentTypeError("FPS must be greater than zero")
+    # FFmpeg stores video rates as AVRational (signed 32-bit components).
+    # Bounding the reduced fraction keeps every accepted canonical value safe
+    # for ffmpeg and makes parse_fps(parse_fps(value)) idempotent.
+    max_component = 2_147_483_647
+    if rate.numerator > max_component or rate.denominator > max_component:
+        raise argparse.ArgumentTypeError("FPS precision or magnitude is too large")
+    return f"{rate.numerator}/{rate.denominator}"
+
+
+def probe_source_fps(video: Path) -> str | None:
+    """Return an ffmpeg-ready source rate, preferring the average frame rate.
+
+    ``avg_frame_rate`` represents the observed average and is the better default
+    for variable-frame-rate inputs. ``r_frame_rate`` remains a fallback for
+    streams where the average is unavailable. Values are normalized to an exact
+    rational so rates such as ``30000/1001`` survive without rounding.
+    """
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+             "-of", "json", str(video)],
+            capture_output=True, text=True, check=True,
+        )
+        streams = json.loads(out.stdout).get("streams") or []
+        if not streams:
+            return None
+        for field in ("avg_frame_rate", "r_frame_rate"):
+            value = streams[0].get(field)
+            if value and value != "0/0":
+                try:
+                    return parse_fps(value)
+                except argparse.ArgumentTypeError:
+                    continue
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None
+    return None
 
 
 # -------- Per-segment extraction (Rule 2 + Rule 3) --------------------------
@@ -217,6 +313,9 @@ def extract_segment(
     preview: bool = False,
     draft: bool = False,
     letterbox: dict | None = None,
+    output_width: int = 1920,
+    output_height: int = 1080,
+    rate: str | None = None,
 ) -> None:
     """Extract a cut range as its own MP4 with grade + 30ms audio fades baked in.
 
@@ -242,9 +341,12 @@ def extract_segment(
         vf_parts.append(TONEMAP_CHAIN)
 
     if draft:
-        scale = "scale=-2:1280" if portrait else "scale=1280:-2"
-    else:
-        scale = "scale=-2:1920" if portrait else "scale=1920:-2"
+        output_width, output_height = 1280, 720
+    scale = (
+        f"scale=-2:{output_height}"
+        if portrait
+        else f"scale={output_width}:-2"
+    )
     vf_parts.append(scale)
 
     if letterbox and not portrait:
@@ -255,9 +357,11 @@ def extract_segment(
             top_bar = round(top_bar * ratio)
             bottom_bar = round(bottom_bar * ratio)
         if top_bar > 0:
-            vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black:t=fill")
+            opacity = float(letterbox.get("opacity", 1.0))
+            vf_parts.append(f"drawbox=x=0:y=0:w=iw:h={top_bar}:color=black@{opacity}:t=fill")
         if bottom_bar > 0:
-            vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black:t=fill")
+            opacity = float(letterbox.get("opacity", 1.0))
+            vf_parts.append(f"drawbox=x=0:y=ih-{bottom_bar}:w=iw:h={bottom_bar}:color=black@{opacity}:t=fill")
 
     if grade_filter:
         vf_parts.append(grade_filter)
@@ -274,15 +378,22 @@ def extract_segment(
     else:
         preset, crf = "fast", "20"
 
+    # Frame rate: use the rate the caller resolved once for the whole render
+    # (every segment must share it — concat -c copy in Rule 2 requires a uniform
+    # frame rate). When called standalone with no rate, preserve this source's
+    # own rate; fall back to 24 only if it can't be probed.
+    out_rate = rate if rate is not None else (probe_source_fps(source) or "24")
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{seg_start:.3f}",
         "-i", str(source),
-        "-t", f"{duration:.3f}",
+        "-t", f"{duration:.9f}",
+        "-frames:v", str(round(duration * float(Fraction(out_rate)))),
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
-        "-pix_fmt", "yuv420p", "-r", "24",
+        "-pix_fmt", "yuv420p", "-r", out_rate,
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-movflags", "+faststart",
         str(out_path),
@@ -296,6 +407,7 @@ def extract_all_segments(
     preview: bool,
     draft: bool = False,
     letterbox: dict | None = None,
+    fps: str | None = None,
 ) -> list[Path]:
     """Extract every EDL range into edit_dir/clips_graded/seg_NN.mp4.
     Returns the ordered list of segment paths.
@@ -314,11 +426,28 @@ def extract_all_segments(
     ranges = edl["ranges"]
     sources = edl["sources"]
 
+    # Resolve ONE output frame rate for the entire render and apply it to every
+    # segment. The lossless concat (Rule 2, `-c copy`) requires all segments to
+    # share a frame rate; probing per-segment would diverge for multi-source
+    # EDLs that mix rates (e.g. a 30fps and a 60fps source) and break the concat.
+    # Explicit --fps wins; otherwise preserve the first source's rate.
+    if fps is not None:
+        out_rate = parse_fps(str(fps))
+    elif ranges:
+        first_src = resolve_path(sources[ranges[0]["source"]], edit_dir)
+        out_rate = probe_source_fps(first_src) or "24"
+    else:
+        out_rate = "24"
+
     seg_paths: list[Path] = []
-    print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/")
+    print(f"extracting {len(ranges)} segment(s) → {clips_dir.name}/  @ {out_rate} fps"
+          f"{' (forced)' if fps is not None else ' (from source)'}")
     if is_auto:
         print("  (auto-grade per segment: analyzing each range)")
-    durations = _render_durations(edl)
+    quant_fps = float(Fraction(out_rate))
+    output_width = int(edl.get("output_width", 1920))
+    output_height = int(edl.get("output_height", 1080))
+    durations = _render_durations(edl, fps=quant_fps)
     for i, (r, duration) in enumerate(zip(ranges, durations)):
         src_name = r["source"]
         src_path = resolve_path(sources[src_name], edit_dir)
@@ -336,7 +465,9 @@ def extract_all_segments(
         if is_auto:
             print(f"        grade: {seg_filter or '(none)'}")
         extract_segment(src_path, start, duration, seg_filter, out_path,
-                        preview=preview, draft=draft, letterbox=letterbox)
+                        preview=preview, draft=draft, letterbox=letterbox,
+                        output_width=output_width, output_height=output_height,
+                        rate=out_rate)
         seg_paths.append(out_path)
 
     return seg_paths
@@ -345,12 +476,29 @@ def extract_all_segments(
 # -------- Lossless concat ----------------------------------------------------
 
 
+def probe_video_duration(path: Path) -> float:
+    """Use encoded video frames, excluding AAC padding, for concat offsets."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_frames,avg_frame_rate,duration",
+         "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    stream = json.loads(result.stdout)["streams"][0]
+    if stream.get("nb_frames") and stream.get("avg_frame_rate") not in (None, "0/0"):
+        return int(stream["nb_frames"]) / float(Fraction(stream["avg_frame_rate"]))
+    return float(stream["duration"])
+
+
 def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -> None:
     """Lossless concat via the concat demuxer. No re-encode."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     concat_list = edit_dir / "_concat.txt"
     concat_list.write_text(
-        "".join(f"file '{p.resolve()}'\n" for p in segment_paths),
+        "".join(
+            f"file '{p.resolve()}'\nduration {probe_video_duration(p):.9f}\n"
+            for p in segment_paths
+        ),
         encoding="utf-8",
     )
 
@@ -398,29 +546,68 @@ def _text_units(text: str) -> int:
     return sum(1 if ord(char) < 128 else 2 for char in text)
 
 
+def _split_overwide_chunk(text: str, max_units: int) -> list[str]:
+    """Split an overwide phrase only at explicit word boundaries.
+
+    Chinese text without spaces has no reliable lexical boundary available to
+    this renderer. Splitting it by character can bisect words such as ``甚至``.
+    In that case fail loudly so an editor can author a complete, approved cue.
+    """
+    total_units = _text_units(text)
+    if total_units <= max_units:
+        return [text]
+    words = text.split()
+    if len(words) < 2:
+        raise ValueError(
+            "overwide caption has no safe word boundary; author an approved "
+            f"cue instead of character-splitting: {text!r} ({total_units}>{max_units})"
+        )
+    parts: list[str] = []
+    current = ""
+    for word in words:
+        candidate = word if not current else f"{current} {word}"
+        if current and _text_units(candidate) > max_units:
+            parts.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    if any(_text_units(part) > max_units for part in parts):
+        raise ValueError(f"caption word exceeds safe width: {text!r}")
+    return parts
+
+
 def _split_single_line_text(text: str, max_units: int) -> list[str]:
     """Split a caption into indivisible punctuation-delimited clauses.
 
-    A phrase ending in a comma is never split across captions. Full stops and
-    semicolons act as hard timing boundaries but are omitted from the rendered
-    text; this keeps Chinese narration captions conversational rather than
-    typeset like prose.
+    Recognized delimiters (split points):
+      - Soft: ，  ,  、  ——  —  ：  :
+      - Hard (also stripped from display): 。  .  ;  ；
+
+    A phrase ending in a comma or enumeration mark is never split across
+    captions. Full stops and semicolons act as hard timing boundaries but are
+    omitted from the rendered text; this keeps Chinese narration captions
+    conversational rather than typeset like prose.
     """
     text = re.sub(r"\s+", " ", text.replace("\\N", " ")).strip()
     if not text:
         return []
 
-    raw_clauses = re.findall(r"[^，,。；;！？!?：:]+[，,。；;！？!?：:]?", text)
+    # Normalize double em-dash to a single delimiter token before splitting
+    text = text.replace("——", "—")
+
+    raw_clauses = re.findall(r"[^，,。；;！？!?：:、—]+[，,。；;！？!?：:、—]?", text)
     chunks: list[str] = []
     current = ""
     for raw_clause in raw_clauses:
         raw_clause = raw_clause.strip()
         if not raw_clause:
             continue
-        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:" else ""
+        terminal = raw_clause[-1] if raw_clause[-1] in "，,。.;；!?！？：:、—" else None
         clause = raw_clause
-        hard_break = terminal in "。.;；"
-        if terminal in "。.;；":
+        hard_break = terminal is not None and terminal in "。.;；"
+        if terminal is not None and terminal in "。.;；":
             clause = raw_clause[:-1].rstrip()
 
         candidate = f"{current}{clause}"
@@ -436,13 +623,22 @@ def _split_single_line_text(text: str, max_units: int) -> list[str]:
 
     if current:
         chunks.append(current)
-    return [chunk for chunk in chunks if chunk]
+    # Commas and enumeration marks are useful inside a caption, but a caption
+    # should not end on them. Strip only after layout decisions so internal
+    # punctuation is preserved when adjacent clauses share one caption.
+    cleaned = [chunk.rstrip("，,。.;；、—").rstrip() for chunk in chunks]
+    fitted: list[str] = []
+    for chunk in cleaned:
+        if chunk:
+            fitted.extend(_split_overwide_chunk(chunk, max_units))
+    return fitted
 
 
 def prepare_single_line_srt(
     source: Path,
     output: Path,
     max_units: int = 48,
+    approved_cues: bool = False,
 ) -> Path:
     """Write a render-only SRT with one non-overlapping caption at a time.
 
@@ -459,7 +655,17 @@ def prepare_single_line_srt(
         start = _parse_srt_timestamp(start_text)
         end = _parse_srt_timestamp(end_text)
         text = " ".join(line.strip() for line in lines[2:] if line.strip())
-        chunks = _split_single_line_text(text, max_units)
+        if approved_cues:
+            units = _text_units(text)
+            if units > max_units:
+                raise ValueError(
+                    f"approved cue exceeds one-line width ({units}>{max_units}): {text!r}"
+                )
+            if text.endswith(("，", ",", "。", ".", "；", ";")):
+                raise ValueError(f"approved cue has forbidden trailing punctuation: {text!r}")
+            chunks = [text]
+        else:
+            chunks = _split_single_line_text(text, max_units)
         if not chunks or end <= start:
             continue
         weights = [max(1, _text_units(chunk)) for chunk in chunks]
@@ -471,6 +677,12 @@ def prepare_single_line_srt(
             cursor = chunk_end
 
     entries.sort(key=lambda entry: float(entry[0]))
+    if approved_cues:
+        for index in range(len(entries) - 1):
+            if float(entries[index][1]) > float(entries[index + 1][0]) + 0.001:
+                raise ValueError(
+                    f"approved cues overlap at entries {index + 1} and {index + 2}"
+                )
     for index in range(len(entries) - 1):
         next_start = float(entries[index + 1][0])
         if float(entries[index][1]) > next_start:
@@ -506,10 +718,45 @@ def _words_in_range(transcript: dict, t_start: float, t_end: float) -> list[dict
     return out
 
 
+CHUNK_WORDS = 2         # target words per cue
+CHUNK_MAX_WORDS = 3     # a too-short chunk may grow to this many words
+CHUNK_MIN_S = 0.35      # a cue shorter than this reads as a flash
+CHUNK_PAUSE_S = 0.3     # a gap this long between words ends the cue
+
+
+def chunk_words(words: list[dict]) -> list[list[dict]]:
+    """Group transcript words into caption cues.
+
+    A cue closes on trailing punctuation or on a pause before the next word.
+    Otherwise it closes at CHUNK_WORDS words, unless it would be on screen for
+    less than CHUNK_MIN_S; then it takes up to CHUNK_MAX_WORDS words. So
+    "does | is" across a pause stays split, and fast "what a" does not flash.
+    """
+    words = [w for w in words if (w.get("text") or "").strip()]
+    chunks: list[list[dict]] = []
+    current: list[dict] = []
+    for i, w in enumerate(words):
+        current.append(w)
+        text = w["text"].strip()
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        gap = (nxt["start"] - w["end"]) if nxt else 0.0
+        dur = w["end"] - current[0]["start"]
+        if (
+            nxt is None
+            or text[-1] in PUNCT_BREAK
+            or gap >= CHUNK_PAUSE_S
+            or len(current) >= CHUNK_MAX_WORDS
+            or (len(current) >= CHUNK_WORDS and dur >= CHUNK_MIN_S)
+        ):
+            chunks.append(current)
+            current = []
+    return chunks
+
+
 def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
     """Build an output-timeline SRT from per-source transcripts.
 
-    - 2-word chunks (break on any punctuation in between)
+    - phrase-aware ~2-word chunks (see chunk_words)
     - UPPERCASE text
     - Output times computed as word.start - segment_start + segment_offset
     """
@@ -519,7 +766,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
     entries: list[tuple[float, float, str]] = []
     seg_offset = 0.0
 
-    durations = _render_durations(edl)
+    durations = _render_durations(edl, fps=int(edl.get("fps", 24)))
     for r, seg_duration in zip(edl["ranges"], durations):
         src_name = r["source"]
         seg_start = float(r["start"])
@@ -534,23 +781,7 @@ def build_master_srt(edl: dict, edit_dir: Path, out_path: Path) -> None:
         transcript = json.loads(tr_path.read_text(encoding="utf-8-sig"))
         words_in_seg = _words_in_range(transcript, seg_start, seg_end)
 
-        # Group into 2-word chunks, break on punctuation
-        chunks: list[list[dict]] = []
-        current: list[dict] = []
-        for w in words_in_seg:
-            text = (w.get("text") or "").strip()
-            if not text:
-                continue
-            current.append(w)
-            # Break if the current text ends in punctuation or we hit 2 words
-            ends_in_punct = bool(text) and text[-1] in PUNCT_BREAK
-            if len(current) >= 2 or ends_in_punct:
-                chunks.append(current)
-                current = []
-        if current:
-            chunks.append(current)
-
-        for chunk in chunks:
+        for chunk in chunk_words(words_in_seg):
             local_start = max(seg_start, chunk[0].get("start", seg_start))
             local_end = min(seg_end, chunk[-1].get("end", seg_end))
             out_start = max(0.0, local_start - seg_start) + seg_offset
@@ -723,6 +954,7 @@ def _load_narration_manifest(narration_path: Path) -> list[dict] | None:
     candidates = [
         narration_path.parent / "narration" / "narration_manifest.json",
         narration_path.parent / "narration_manifest.json",
+        narration_path.parent / "narration_manifest.approved.json",
     ]
     for p in candidates:
         if p.exists():
@@ -741,10 +973,17 @@ def _build_duck_filter(
     narration_input: str,
     blocks: list[dict],
     audio_mix: dict,
+    ranges: list[dict] | None = None,
 ) -> tuple[str, str]:
     """Build an ffmpeg audio filter that mixes narration over ducked source.
 
     Source and narration levels come from the EDL ``audio_mix`` object.
+
+    Cue-level override: if a range's cue appears in
+    ``audio_mix.cue_source_volume`` (dict mapping cue index → source volume),
+    that volume replaces the standard under/gap duck for that cue's output
+    window. Use this for source-led sections where the original audio must be
+    at full volume while narration plays underneath.
 
     Returns (filter_string, output_label).
     """
@@ -758,19 +997,76 @@ def _build_duck_filter(
         duck_expr_parts.append(f"between(t,{t0:.3f},{t1:.3f})")
 
     narration_volume = audio_mix["narration_volume"]
-    if not duck_expr_parts:
-        return f"{narration_input}volume={narration_volume}[outa]", "[outa]"
 
-    duck_expr = "+".join(duck_expr_parts)
+    # Collect cue-level source-volume override windows
+    cue_overrides: dict[str, float] = audio_mix.get("cue_source_volume") or {}
+    override_windows: dict[float, list[tuple[float, float]]] = {}
+    if ranges and cue_overrides:
+        for r in ranges:
+            cue = r.get("cue")
+            if cue is None:
+                continue
+            cue_key = str(cue)
+            if cue_key not in cue_overrides:
+                continue
+            vol = float(cue_overrides[cue_key])
+            idx = cue - 1
+            if idx < 0 or idx >= len(blocks):
+                continue
+            b = blocks[idx]
+            audio_dur = float(b.get("audio_duration") or 0)
+            if audio_dur <= 0:
+                continue
+            t0 = float(b["output_start"])
+            t1 = t0 + audio_dur
+            override_windows.setdefault(vol, []).append((t0, t1))
+
+    # Auto-override for preserve_slot gaps: source at full volume during the
+    # gap window (after narration ends, before the next section). This is where
+    # the original audio plays in 原声保留 sections.
+    for b in blocks:
+        if not b.get("preserve_slot"):
+            continue
+        audio_dur = float(b.get("audio_duration") or 0)
+        output_dur = float(b.get("output_duration") or audio_dur)
+        if output_dur <= audio_dur + 0.5:
+            continue
+        t0_gap = float(b["output_start"]) + audio_dur
+        t1_gap = float(b["output_start"]) + output_dur
+        override_windows.setdefault(1.0, []).append((t0_gap, t1_gap))
+
     mode = audio_mix["source_mode"]
     under = 0.0 if mode == "muted" else audio_mix["source_under_narration"]
     gaps = audio_mix["source_in_gaps"] if mode == "throughout" else 0.0
-    duck_formula = f"if({duck_expr},{under},{gaps})"
+
+    if not duck_expr_parts and not override_windows:
+        return f"{narration_input}volume={narration_volume}[outa]", "[outa]"
+
+    # Build source-volume formula:
+    # priority: cue override > standard narration window > gap
+    # nested if(cond, vol, if(cond, vol, ...))
+    inner_parts: list[str] = []
+    # Innermost: standard narration window check
+    if duck_expr_parts:
+        duck_expr = "+".join(duck_expr_parts)
+        inner_parts.append(f"if(gt({duck_expr},0),{under},{gaps})")
+    else:
+        inner_parts.append(f"{gaps}")
+    # Wrap with each override window
+    for vol, windows in sorted(override_windows.items(), reverse=True):
+        cond_parts = [f"between(t,{t0:.3f},{t1:.3f})" for t0, t1 in windows]
+        cond = "+".join(cond_parts)
+        # Replace the innermost formula with: if(in_override, vol, innermost)
+        innermost = inner_parts[-1]
+        new_formula = f"if(gt({cond},0),{vol},{innermost})"
+        inner_parts[-1] = new_formula
+
+    duck_formula = inner_parts[-1]
 
     parts: list[str] = [
         f"{base_input}volume=eval=frame:volume='{duck_formula}'[srcducked]",
         f"{narration_input}aresample=48000,volume={narration_volume}[narr48]",
-        f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[outa]",
+        f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1:normalize=0[outa]",
     ]
     return ";".join(parts), "[outa]"
 
@@ -789,6 +1085,7 @@ def build_final_composite(
     subtitle_layout: dict | None = None,
     audio_mix: dict | None = None,
     target_duration: float | None = None,
+    edl_ranges: list[dict] | None = None,
 ) -> None:
     """Final pass: base → overlays (PTS-shifted) → subtitles LAST → out.
 
@@ -807,6 +1104,21 @@ def build_final_composite(
     narration_blocks: list[dict] | None = None
     if has_narration:
         narration_blocks = _load_narration_manifest(narration_path)
+
+    requested_mix = audio_mix or DEFAULT_AUDIO_MIX
+    if (
+        has_narration
+        and narration_blocks is None
+        and requested_mix["source_mode"] == "throughout"
+        and (
+            float(requested_mix["source_under_narration"]) > 0
+            or float(requested_mix["source_in_gaps"]) > 0
+        )
+    ):
+        raise FileNotFoundError(
+            "narration manifest is required when source audio must be mixed; "
+            "refusing to replace the source track silently"
+        )
 
     use_audio_mix = has_narration and narration_blocks is not None
 
@@ -872,6 +1184,7 @@ def build_final_composite(
         audio_filter, audio_out = _build_duck_filter(
             f"[0:a]", f"[{narration_input_idx}:a]", narration_blocks,
             audio_mix or DEFAULT_AUDIO_MIX,
+            edl_ranges,
         )
         filter_parts.append(audio_filter)
         audio_map = audio_out
@@ -966,6 +1279,14 @@ def main() -> None:
         "--narration", type=Path, default=None,
         help="Narration audio file to replace source audio (overrides EDL narration field)",
     )
+    ap.add_argument(
+        "--fps",
+        type=parse_fps,
+        default=None,
+        help="Output frame rate. Default: preserve the source's frame rate "
+             "(falls back to 24 if it can't be probed). Pass e.g. --fps 30 or "
+             "--fps 30000/1001 to force.",
+    )
     args = ap.parse_args()
 
     edl_path = args.edl.resolve()
@@ -984,6 +1305,7 @@ def main() -> None:
         if subtitle_layout.get("bar_position", "bottom") != "bottom":
             sys.exit("subtitle_layout.bar_position currently supports only 'bottom'")
         letterbox["bottom"] = int(subtitle_layout.get("bar_height", 84))
+        letterbox["opacity"] = float(subtitle_layout.get("bar_opacity", 1.0))
     if not letterbox:
         letterbox = None
     if letterbox:
@@ -995,7 +1317,7 @@ def main() -> None:
 
     # 1. Extract per-segment (auto-grade per range if EDL grade is "auto")
     segment_paths = extract_all_segments(
-        edl, edit_dir, preview=args.preview, draft=args.draft, letterbox=letterbox
+        edl, edit_dir, preview=args.preview, draft=args.draft, letterbox=letterbox, fps=args.fps
     )
 
     # 2. Concat → base
@@ -1015,15 +1337,14 @@ def main() -> None:
             subs_path = edit_dir / "master.srt"
             build_master_srt(edl, edit_dir, subs_path)
         elif edl.get("subtitles"):
-            subs_path = resolve_path(edl["subtitles"], edit_dir)
-            if not subs_path.exists():
-                sys.exit(f"subtitles path in EDL does not exist: {subs_path}")
+            subs_path = resolve_subtitles_path(edl["subtitles"], edit_dir)
         if subs_path and int(subtitle_layout.get("max_lines", 2)) == 1:
             max_units = int(subtitle_layout.get("max_units", 48))
             subs_path = prepare_single_line_srt(
                 subs_path,
                 edit_dir / f"{subs_path.stem}.single-line.srt",
                 max_units=max_units,
+                approved_cues=bool(subtitle_layout.get("approved_cues", False)),
             )
 
     # 4. Resolve narration audio (CLI override > EDL field)
@@ -1046,16 +1367,19 @@ def main() -> None:
         if "start_in_output" not in overlay or "duration" not in overlay:
             sys.exit(f"overlay #{index} needs start_in_output and duration")
     target_duration = float(edl["total_duration_s"]) if edl.get("total_duration_s") else None
+    edl_ranges = edl.get("ranges")
     if args.no_loudnorm:
         build_final_composite(
             base_path, overlays, subs_path, out_path, edit_dir, narration_path,
             letterbox, subtitle_layout, audio_mix, target_duration,
+            edl_ranges,
         )
     else:
         tmp_composite = out_path.with_suffix(".prenorm.mp4")
         build_final_composite(
             base_path, overlays, subs_path, tmp_composite, edit_dir, narration_path,
             letterbox, subtitle_layout, audio_mix, target_duration,
+            edl_ranges,
         )
         print("loudness normalization → social-ready (-14 LUFS / -1 dBTP / LRA 11)")
         apply_loudnorm_two_pass(tmp_composite, out_path, preview=args.draft)
