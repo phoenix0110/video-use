@@ -150,14 +150,27 @@ def parse_narration_blocks(script_path: Path) -> list[dict]:
     for i, m in enumerate(sections):
         start_str, end_str, title = m.group(1), m.group(2), m.group(3).strip()
         chunk = content[m.end(): sections[i + 1].start() if i + 1 < len(sections) else len(content)]
-        lines = [l.lstrip(">").strip() for l in chunk.splitlines() if l.strip().startswith(">")]
-        if lines:
+        # Only collect > lines from **旁白** blocks; skip > lines under
+        # **原声保留** (those are source quotes / translations for subtitles).
+        narration_lines: list[str] = []
+        in_preserve = False
+        for raw_line in chunk.splitlines():
+            stripped = raw_line.strip()
+            if re.match(r"\*\*\u539f\u58f0\u4fdd\u7559\*\*", stripped):
+                in_preserve = True
+                continue
+            if re.match(r"\*\*\u65c1\u767d\*\*", stripped):
+                in_preserve = False
+                continue
+            if stripped.startswith(">") and not in_preserve:
+                narration_lines.append(stripped.lstrip(">").strip())
+        if narration_lines:
             blocks.append({
                 "section": title,
                 "start": start_str,
                 "end": end_str,
                 "duration": _mmss_to_seconds(end_str) - _mmss_to_seconds(start_str),
-                "text": "\n".join(lines),
+                "text": "\n".join(narration_lines),
                 "preserve_slot": bool(re.search(r"^\s*\*\*\u539f\u58f0\u4fdd\u7559\*\*", chunk, re.MULTILINE)),
             })
 
@@ -169,6 +182,24 @@ def _mmss_to_seconds(mmss: str) -> float:
     if len(parts) == 2:
         return int(parts[0]) * 60 + int(parts[1])
     return float(mmss)
+
+
+def validate_recap_handoff(script_path: Path) -> None:
+    """Enforce the polishing gate for SOP scripts before creating audio or caches."""
+    script_path = script_path.resolve()
+    sop_script = script_path.parent.name == "gameshow-recap-creator"
+    has_receipt = (script_path.parent / "narration-review.json").is_file()
+    if not (sop_script or has_receipt):
+        return
+    validator = _REPO_ROOT.parent / "gameshow-recap-creator" / "tools" / "validate_narration_review.py"
+    if not validator.is_file():
+        raise SystemExit("Recap review validator is missing; restore Layer 4 tooling before TTS")
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", str(validator), str(script_path)],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    if result.returncode:
+        raise SystemExit("Recap polishing review required before TTS:\n" + result.stdout + result.stderr)
 
 
 async def batch_from_script(
@@ -184,6 +215,7 @@ async def batch_from_script(
 
     Returns the blocks list with an added 'audio_path' and 'audio_duration' key.
     """
+    validate_recap_handoff(script_path)
     blocks = parse_narration_blocks(script_path)
     if not blocks:
         print("no narration blocks found in script")
@@ -454,6 +486,7 @@ async def list_voices(language: str | None = None) -> None:
 
 
 def main() -> None:
+    raise SystemExit("Edge TTS synthesis is retired for this workflow. Use helpers/jianying_tts.py through the jianying-editor runtime; one subtitle = one native TTS audio.")
     ap = argparse.ArgumentParser(
         description="Text-to-speech via Edge TTS (free, no API key)"
     )

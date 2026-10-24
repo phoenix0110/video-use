@@ -126,7 +126,7 @@ def _range_duration(item: dict) -> float:
     return duration
 
 
-def _render_durations(edl: dict, fps: int = 24) -> list[float]:
+def _render_durations(edl: dict, fps: float = 24) -> list[float]:
     """Quantize range durations to frames while preserving the exact total.
 
     Encoding many fractional-duration clips independently otherwise rounds each
@@ -388,7 +388,8 @@ def extract_segment(
         "ffmpeg", "-y",
         "-ss", f"{seg_start:.3f}",
         "-i", str(source),
-        "-t", f"{duration:.3f}",
+        "-t", f"{duration:.9f}",
+        "-frames:v", str(round(duration * float(Fraction(out_rate)))),
         "-vf", vf,
         "-af", af,
         "-c:v", "libx264", "-preset", preset, "-crf", crf,
@@ -443,7 +444,7 @@ def extract_all_segments(
           f"{' (forced)' if fps is not None else ' (from source)'}")
     if is_auto:
         print("  (auto-grade per segment: analyzing each range)")
-    quant_fps = int(edl.get("fps", 24))
+    quant_fps = float(Fraction(out_rate))
     output_width = int(edl.get("output_width", 1920))
     output_height = int(edl.get("output_height", 1080))
     durations = _render_durations(edl, fps=quant_fps)
@@ -475,12 +476,29 @@ def extract_all_segments(
 # -------- Lossless concat ----------------------------------------------------
 
 
+def probe_video_duration(path: Path) -> float:
+    """Use encoded video frames, excluding AAC padding, for concat offsets."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=nb_frames,avg_frame_rate,duration",
+         "-of", "json", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    stream = json.loads(result.stdout)["streams"][0]
+    if stream.get("nb_frames") and stream.get("avg_frame_rate") not in (None, "0/0"):
+        return int(stream["nb_frames"]) / float(Fraction(stream["avg_frame_rate"]))
+    return float(stream["duration"])
+
+
 def concat_segments(segment_paths: list[Path], out_path: Path, edit_dir: Path) -> None:
     """Lossless concat via the concat demuxer. No re-encode."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     concat_list = edit_dir / "_concat.txt"
     concat_list.write_text(
-        "".join(f"file '{p.resolve()}'\n" for p in segment_paths),
+        "".join(
+            f"file '{p.resolve()}'\nduration {probe_video_duration(p):.9f}\n"
+            for p in segment_paths
+        ),
         encoding="utf-8",
     )
 
@@ -1048,7 +1066,7 @@ def _build_duck_filter(
     parts: list[str] = [
         f"{base_input}volume=eval=frame:volume='{duck_formula}'[srcducked]",
         f"{narration_input}aresample=48000,volume={narration_volume}[narr48]",
-        f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1[outa]",
+        f"[srcducked][narr48]amix=inputs=2:duration=longest:dropout_transition=0:weights=1 1:normalize=0[outa]",
     ]
     return ";".join(parts), "[outa]"
 
